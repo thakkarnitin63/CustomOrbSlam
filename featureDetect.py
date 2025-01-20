@@ -27,7 +27,7 @@ def visualize_keypoints(image,keypoints):
     # Create a resizable window
     cv2.namedWindow('ORB Keypoints', cv2.WINDOW_NORMAL)
 
-    # Set the window size (e.g., 800x600)
+    # Set the window size (e.g., 1980x1080)
     cv2.resizeWindow('ORB Keypoints', 1980, 1080)
 
     # Display the image
