@@ -28,15 +28,20 @@ class ImageLoader:
     def _load_calibration(self):
         """
         Loads calibration parameters from calib.txt.
-        :return : Dictionary containing calibration parameters.
-        
+        :return: Dictionary containing calibration parameters.
         """
         calib_path = os.path.join(self.sequence_path, 'calib.txt')
         calib = {}
         with open(calib_path, 'r') as f:
             for line in f:
                 key, value = line.split(':', 1)
-                calib[key] = np.array([float(x) for x in value.split()])
+                # Convert the string of numbers into a numpy array
+                projection_matrix = np.array([float(x) for x in value.split()])
+                # Reshape into a 3x4 matrix
+                projection_matrix = projection_matrix.reshape(3, 4)
+                # Extract the intrinsic matrix K (3x3)
+                K = projection_matrix[:, :3]
+                calib[key] = K
         return calib
 
     def load_image(self, frame_id):
