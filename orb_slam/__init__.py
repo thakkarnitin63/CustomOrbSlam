@@ -8,7 +8,6 @@ from .pose_estimator import PoseEstimator
 from .map_manager import MapManager
 from .optimizer import Optimizer
 from .visualizer import Visualizer
-from .slam_system import SLAMSystem
 
 # Defining the public API of the package
 __all__ = [
@@ -19,5 +18,4 @@ __all__ = [
     'MapManager',
     'Optimizer',
     'Visualizer',
-    'SLAMSystem'
 ]
