@@ -1,97 +1,158 @@
-import os
-import cv2
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Use a non-interactive backend
-import matplotlib.pyplot as plt
 from orb_slam.image_loader import ImageLoader
 from orb_slam.feature_extractor import FeatureExtractor
 from orb_slam.feature_matcher import FeatureMatcher
 from orb_slam.pose_estimator import PoseEstimator
+from orb_slam.visualizer import Visualizer
+import matplotlib.pyplot as plt
+
+
+def plot_translation_deviations(estimated_poses, ground_truth_poses):
+    estimated_positions = np.array([pose[:3, 3] for pose in estimated_poses])
+    ground_truth_positions = np.array([pose[:3, 3] for pose in ground_truth_poses])
+
+    deviations = np.abs(estimated_positions - ground_truth_positions)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(deviations[:, 0], label='X Deviation')
+    plt.plot(deviations[:, 1], label='Y Deviation')
+    plt.plot(deviations[:, 2], label='Z Deviation')
+    plt.xlabel('Frame Index')
+    plt.ylabel('Deviation (meters)')
+    plt.title('Translation Deviations Between Estimated and Ground Truth Poses')
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# Call this after RMSE computation
+
+
 
 def load_ground_truth_poses(file_path):
     """
-    Loads ground truth poses from a text file.
-    Each line in the file should represent a 3x4 transformation matrix.
+    Load ground truth poses from a KITTI pose file.
+    :param file_path: Path to the poses.txt file.
+    :return: List of 4x4 numpy arrays representing the poses.
     """
     poses = []
     with open(file_path, 'r') as f:
         for line in f:
-            T = np.fromstring(line, sep=' ').reshape(3, 4)
-            pose = np.eye(4)
-            pose[:3, :4] = T
+            values = list(map(float, line.strip().split()))
+            pose = np.array(values).reshape(3, 4)
+            pose = np.vstack((pose, [0, 0, 0, 1]))  # Convert to homogeneous matrix
             poses.append(pose)
-    return np.array(poses)
+    return poses
+
+
+def compute_rmse_per_frame(estimated_poses, ground_truth_poses):
+    """
+    Compute the RMSE between estimated and ground truth poses for each frame.
+    :param estimated_poses: List of 4x4 numpy arrays of estimated poses.
+    :param ground_truth_poses: List of 4x4 numpy arrays of ground truth poses.
+    :return: List of RMSE values for each frame.
+    """
+    assert len(estimated_poses) == len(ground_truth_poses), "Pose lists must have the same length."
+    rmse_values = []
+    for est_pose, gt_pose in zip(estimated_poses, ground_truth_poses):
+        translation_diff = est_pose[:3, 3] - gt_pose[:3, 3]
+        rmse = np.sqrt(np.mean(translation_diff**2))
+        rmse_values.append(rmse)
+    return rmse_values
+
+
+
+
+
+def initialize_first_pose(image_loader, feature_extractor, feature_matcher, pose_estimator):
+    """
+    Estimate the initial pose using the first two frames.
+    :return: Initial rotation matrix (R), translation vector (t), pose (4x4 matrix), and descriptors for frame 2.
+    """
+    image1 = image_loader.load_image(0)
+    image2 = image_loader.load_image(1)
+
+    # Extract features
+    keypoints1, descriptors1 = feature_extractor.extract(image1)
+    keypoints2, descriptors2 = feature_extractor.extract(image2)
+
+    # Match features
+    matches = feature_matcher.match(descriptors1, descriptors2)
+    filtered_matches = feature_matcher.filter_matches(matches, keypoints1, keypoints2)
+
+    # Estimate relative pose
+    R, t, _ = pose_estimator.estimate_pose(keypoints1, keypoints2, filtered_matches)
+
+    # Construct the pose matrix for the second frame
+    initial_pose = np.eye(4)
+    initial_pose[:3, :3] = R
+    initial_pose[:3, 3] = t.flatten()
+
+    return R, t, initial_pose, keypoints2, descriptors2
+
 
 def main():
-    # Define the paths to your dataset sequence and ground truth poses
     sequence_path = '/home/nitin/NitinWs/CustomOrbSlam/data/dataset/sequences/00'
-    gt_poses_path = '/home/nitin/NitinWs/CustomOrbSlam/data/dataset/poses/00.txt'
+    ground_truth_file = '/home/nitin/NitinWs/CustomOrbSlam/data/dataset/poses/00.txt'
+
+    # Initialize components
+    image_loader = ImageLoader(sequence_path)
+    feature_extractor = FeatureExtractor()
+    feature_matcher = FeatureMatcher(ratio_thresh=0.75)
+    calibration_matrices = image_loader._load_calibration()
+    K = calibration_matrices.get('P0')
+    pose_estimator = PoseEstimator(K)
+    visualizer = Visualizer()
 
     # Load ground truth poses
-    ground_truth_poses = load_ground_truth_poses(gt_poses_path)
+    ground_truth_poses = load_ground_truth_poses(ground_truth_file)
 
-    # Initialize the ImageLoader, FeatureExtractor, FeatureMatcher, and PoseEstimator
-    image_loader = ImageLoader(sequence_path)
-    feature_extractor = FeatureExtractor(nfeatures=500)
-    feature_matcher = FeatureMatcher(ratio_thresh=0.75)
+    # Initialize the first pose
+    prev_R, prev_t, initial_pose, prev_keypoints, prev_descriptors = initialize_first_pose(
+        image_loader, feature_extractor, feature_matcher, pose_estimator
+    )
+    estimated_poses = [np.eye(4), initial_pose]
 
-    # Load calibration parameters
-    K = image_loader.calibration['P0']  # Extract the 3x3 intrinsic matrix
+    num_frames_to_process = 1000
+    for frame_id in range(2, num_frames_to_process):  # Start from the third frame
+        current_image = image_loader.load_image(frame_id)
 
-    # Initialize PoseEstimator with the intrinsic camera matrix
-    pose_estimator = PoseEstimator(camera_matrix=K)
+        # Extract features
+        keypoints, descriptors = feature_extractor.extract(current_image)
 
-    # Initialize variables to store the trajectory
-    trajectory = [np.eye(4)]
+        # Match features
+        matches = feature_matcher.match(prev_descriptors, descriptors)
+        filtered_matches = feature_matcher.filter_matches(matches, prev_keypoints, keypoints)
 
-    # Process a sequence of images
-    num_frames = min(len(ground_truth_poses), 10)  # Ensure we don't exceed available ground truth data
-    for i in range(1, num_frames):
-        # Load consecutive images
-        image1 = image_loader.load_image(i - 1)
-        image2 = image_loader.load_image(i)
+        try:
+            R, t, _ = pose_estimator.estimate_pose(prev_keypoints, keypoints, filtered_matches)
+            current_pose = np.eye(4)
+            current_pose[:3, :3] = np.dot(R, prev_R)
+            current_pose[:3, 3] = prev_R.dot(t).flatten() + prev_t.flatten()
 
-        # Extract features from both images
-        keypoints1, descriptors1 = feature_extractor.extract(image1)
-        keypoints2, descriptors2 = feature_extractor.extract(image2)
+            estimated_poses.append(current_pose)
+            prev_R, prev_t = current_pose[:3, :3], current_pose[:3, 3].reshape(3, 1)
+        except ValueError as e:
+            print(f"Pose estimation failed at frame {frame_id}: {e}")
+            continue
 
-        # Match features between the two images
-        matches = feature_matcher.match(descriptors1, descriptors2)
+        # Update for the next iteration
+        prev_keypoints, prev_descriptors = keypoints, descriptors
 
-        # Estimate the pose between the two frames
-        R, t = pose_estimator.estimate_pose(keypoints1, keypoints2, matches)
+    # Adjust estimated poses and ground truth lengths
+    min_length = min(len(estimated_poses), len(ground_truth_poses[:num_frames_to_process]))
+    estimated_poses = estimated_poses[:min_length]
+    ground_truth_poses = ground_truth_poses[:min_length]
 
-        # Construct the transformation matrix
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = t.flatten()
+    # Compute RMSE
+    rmse_values = compute_rmse_per_frame(estimated_poses, ground_truth_poses)
+    for frame_id, rmse in enumerate(rmse_values):
+        print(f"Frame {frame_id}: RMSE = {rmse:.4f}")
 
-        # Update the current pose
-        current_pose = trajectory[-1] @ np.linalg.inv(T)
-        trajectory.append(current_pose)
+    # Visualize trajectory comparison
+    visualizer.plot_trajectory_xz(estimated_poses)
+    visualizer.plot_trajectory_xz(ground_truth_poses)
+    plot_translation_deviations(estimated_poses, ground_truth_poses)
 
-    # Convert trajectory to numpy array for plotting
-    trajectory = np.array(trajectory)
 
-    # Extract X and Z coordinates for top-down view
-    est_x = trajectory[:, 0, 3]
-    est_z = trajectory[:, 2, 3]
-    gt_x = ground_truth_poses[:num_frames, 0, 3]
-    gt_z = ground_truth_poses[:num_frames, 2, 3]
-
-    # Plot the top-down trajectory
-    plt.figure()
-    plt.plot(est_x, est_z, marker='o', label='Estimated Trajectory')
-    plt.plot(gt_x, gt_z, marker='x', label='Ground Truth Trajectory')
-    plt.xlabel('X Position')
-    plt.ylabel('Z Position')
-    plt.title('Top-Down View of Trajectories')
-    plt.legend()
-    plt.grid()
-    plt.axis('equal')
-    plt.savefig('top_down_trajectory_comparison.png')
-    plt.show()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

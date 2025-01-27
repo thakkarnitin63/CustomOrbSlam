@@ -8,6 +8,7 @@ from .pose_estimator import PoseEstimator
 from .map_manager import MapManager
 from .optimizer import Optimizer
 from .visualizer import Visualizer
+from .loop_closure_detector import LoopClosureDetector
 
 # Defining the public API of the package
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     'MapManager',
     'Optimizer',
     'Visualizer',
+    'LoopClosureDetector'
 ]
