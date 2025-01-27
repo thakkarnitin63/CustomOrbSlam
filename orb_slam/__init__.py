@@ -9,6 +9,7 @@ from .map_manager import MapManager
 from .optimizer import Optimizer
 from .visualizer import Visualizer
 from .loop_closure_detector import LoopClosureDetector
+from .keyframe_manager import KeyframeManager
 
 # Defining the public API of the package
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     'MapManager',
     'Optimizer',
     'Visualizer',
-    'LoopClosureDetector'
+    'LoopClosureDetector',
+    'KeyframeManager'
 ]
