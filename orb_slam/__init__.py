@@ -10,6 +10,7 @@ from .optimizer import Optimizer
 from .visualizer import Visualizer
 from .loop_closure_detector import LoopClosureDetector
 from .keyframe_manager import KeyframeManager
+from .mapping import SparseMapping, MapPoint, KeyFrame
 
 # Defining the public API of the package
 __all__ = [
@@ -21,5 +22,8 @@ __all__ = [
     'Optimizer',
     'Visualizer',
     'LoopClosureDetector',
-    'KeyframeManager'
+    'KeyframeManager',
+    'KeyFrame'
+    'MapPoint',
+    'SparseMapping'
 ]

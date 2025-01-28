@@ -5,7 +5,9 @@ from orb_slam.feature_matcher import FeatureMatcher
 from orb_slam.pose_estimator import PoseEstimator
 from orb_slam.visualizer import Visualizer
 from orb_slam.keyframe_manager import KeyframeManager
+from orb_slam.mapping import SparseMapping, MapPoint, KeyFrame
 import matplotlib.pyplot as plt
+
 
 
 def load_ground_truth_poses(file_path):
@@ -23,51 +25,6 @@ def load_ground_truth_poses(file_path):
             poses.append(pose)
     return poses
 
-
-def compute_rmse_per_frame(estimated_poses, ground_truth_poses):
-    """
-    Compute the RMSE between estimated and ground truth poses for each frame.
-    :param estimated_poses: List of 4x4 numpy arrays of estimated poses.
-    :param ground_truth_poses: List of 4x4 numpy arrays of ground truth poses.
-    :return: List of RMSE values for each frame.
-    """
-    assert len(estimated_poses) == len(ground_truth_poses), "Pose lists must have the same length."
-    rmse_values = []
-    for est_pose, gt_pose in zip(estimated_poses, ground_truth_poses):
-        translation_diff = est_pose[:3, 3] - gt_pose[:3, 3]
-        rmse = np.sqrt(np.mean(translation_diff**2))
-        rmse_values.append(rmse)
-    return rmse_values
-
-
-
-
-
-# def initialize_first_pose(image_loader, feature_extractor, feature_matcher, pose_estimator):
-#     """
-#     Estimate the initial pose using the first two frames.
-#     :return: Initial rotation matrix (R), translation vector (t), pose (4x4 matrix), and descriptors for frame 2.
-#     """
-#     image1 = image_loader.load_image(0)
-#     image2 = image_loader.load_image(1)
-
-#     # Extract features
-#     keypoints1, descriptors1 = feature_extractor.extract(image1)
-#     keypoints2, descriptors2 = feature_extractor.extract(image2)
-
-#     # Match features
-#     matches = feature_matcher.match(descriptors1, descriptors2)
-#     filtered_matches = feature_matcher.filter_matches(matches, keypoints1, keypoints2)
-
-#     # Estimate relative pose
-#     R, t, _ = pose_estimator.estimate_pose(keypoints1, keypoints2, filtered_matches)
-
-#     # Construct the pose matrix for the second frame
-#     initial_pose = np.eye(4)
-#     initial_pose[:3, :3] = R
-#     initial_pose[:3, 3] = t.flatten()
-
-#     return R, t, initial_pose, keypoints2, descriptors2
 
 
 def main():
@@ -94,11 +51,13 @@ def main():
     estimated_poses = [prev_pose]
 
     # Add the initial pose as a keyframe
-    keyframe_manager.add_keyframe(prev_pose)
+    initial_keyframe = KeyFrame(id=0, pose=prev_pose, keypoints=None, descriptors=None)
+    keyframe_manager.add_keyframe(initial_keyframe)
+    print(f"Added initial keyframe at frame 0.")
 
     # Process frames
     num_frames_to_process = 1000
-    for frame_id in range(num_frames_to_process):
+    for frame_id in range(1, num_frames_to_process):
         current_image = image_loader.load_image(frame_id)
 
         # Extract features
@@ -119,10 +78,11 @@ def main():
                 estimated_poses.append(current_pose)
 
                 # Check if the current frame should be a keyframe
-                last_keyframe_pose = keyframe_manager.get_last_keyframe_pose()
-                if last_keyframe_pose is not None:
-                    if keyframe_manager.is_new_keyframe(current_pose, last_keyframe_pose, len(filtered_matches)):
-                        keyframe_manager.add_keyframe(current_pose)
+                last_keyframe = keyframe_manager.get_last_keyframe()
+                if last_keyframe is not None:
+                    if keyframe_manager.is_new_keyframe(current_pose, last_keyframe.pose, len(filtered_matches)):
+                        new_keyframe = KeyFrame(id=frame_id, pose=current_pose, keypoints=keypoints, descriptors=descriptors)
+                        keyframe_manager.add_keyframe(new_keyframe)
                         print(f"Added keyframe at frame {frame_id}.")
 
                 prev_pose = current_pose
