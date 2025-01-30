@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 from sklearn.cluster import DBSCAN
 from scipy.spatial import KDTree
+import g2o
 
 class SparseMapping:
     def __init__(self, camera_matrix):
@@ -34,6 +35,70 @@ class SparseMapping:
         if dist < threshold:
             return self.map_points[index]
         return None
+    
+    def local_bundle_adjustment(self, recent_keyframe, connected_keyframes):
+        """
+        Perform Local Bundle Adjustment for recent and connected keyframes.
+        :param recent_keyframe: The most recently added keyframe.
+        :param connected_keyframes: List of keyframes connected to the recent keyframe.
+        """
+        
+
+        # Initialize the linear solver
+        optimizer = g2o.SparseOptimizer()
+        solver = g2o.BlockSolverSE3(g2o.LinearSolverCholmodSE3())
+        solver = g2o.OptimizationAlgorithmLevenberg(solver)
+        optimizer.set_algorithm(solver)
+
+        # Add recent keyframe as a vertex
+        recent_vertex = g2o.VertexSE3Expmap()
+        recent_vertex.set_id(recent_keyframe.id)
+        recent_vertex.set_estimate(g2o.SE3Quat(recent_keyframe.pose[:3, :3], recent_keyframe.pose[:3, 3]))
+        optimizer.add_vertex(recent_vertex)
+
+        # Add connected keyframes as vertices
+        keyframe_vertices = {}
+        for kf in connected_keyframes:
+            vertex = g2o.VertexSE3Expmap()
+            vertex.set_id(kf.id)
+            vertex.set_estimate(g2o.SE3Quat(kf.pose[:3, :3], kf.pose[:3, 3]))
+            vertex.set_fixed(True)  # Keep connected keyframes fixed
+            optimizer.add_vertex(vertex)
+            keyframe_vertices[kf.id] = vertex
+
+        # Add map points as vertices
+        point_id_offset = 1000  # Offset to ensure unique IDs for map points
+        for i, mp in enumerate(self.map_points):
+            if any(kf.id in mp.observations for kf in [recent_keyframe] + connected_keyframes):
+                vertex = g2o.VertexPointXYZ() # Updated class name
+                vertex_id = point_id_offset + i
+                vertex.set_id(vertex_id)
+                vertex.set_estimate(mp.position)
+                optimizer.add_vertex(vertex)
+
+                # Add edges for observations
+                for kf_id, point_2d in mp.observations.items():
+                    if kf_id in keyframe_vertices:
+                        edge = g2o.EdgeProjectXYZ2UV()
+                        edge.set_vertex(0, vertex)  # Map point
+                        edge.set_vertex(1, keyframe_vertices[kf_id])  # Keyframe
+                        edge.set_measurement(point_2d)  # Observed 2D point
+                        edge.set_information(np.eye(2))  # Weight matrix
+                        edge.set_robust_kernel(g2o.RobustKernelHuber())
+                        optimizer.add_edge(edge)
+
+        # Optimize
+        print(f"Running Local Bundle Adjustment...")
+        optimizer.initialize_optimization()
+        optimizer.optimize(10)  # Perform 10 iterations
+
+        # Update keyframes and map points
+        recent_keyframe.pose = recent_vertex.estimate().matrix()
+        for i, mp in enumerate(self.map_points):
+            vertex_id = point_id_offset + i
+            if vertex_id in optimizer.vertices():
+                mp.position = optimizer.vertex(vertex_id).estimate()
+        
 
     def triangulate_points(self, keyframe1, keyframe2, matches, R, t, dbscan_eps=7, dbscan_min_samples=5):
         """

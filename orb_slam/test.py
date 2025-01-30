@@ -112,7 +112,11 @@ def main():
                             keyframe1, keyframe2, filtered_matches, R, t
                         )
                         # print(f"Triangulated {len(new_map_points)} map points.")
-
+                    
+                    # Perform Local Bundle Adjustment
+                    recent_keyframe = keyframe_manager.keyframes[-1]
+                    connected_keyframes = keyframe_manager.get_recent_keyframes()[:-1]  # Exclude the most recent
+                    sparse_mapping.local_bundle_adjustment(recent_keyframe, connected_keyframes)
             prev_pose = current_pose
             # Print tracking stability details
             print(f"Frame {frame_id}: Matches={len(filtered_matches)}, KeyFrames={len(keyframe_manager.keyframes)}, MapPoints={len(sparse_mapping.map_points)}")
