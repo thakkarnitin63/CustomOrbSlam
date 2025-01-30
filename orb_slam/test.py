@@ -24,7 +24,23 @@ def load_ground_truth_poses(file_path):
             pose = np.vstack((pose, [0, 0, 0, 1]))  # Convert to homogeneous matrix
             poses.append(pose)
     return poses
-
+def compute_rmse(estimated_keyframes, ground_truth_poses):
+    """
+    Compute the RMSE between the estimated keyframe poses and the ground truth poses.
+    :param estimated_keyframes: List of KeyFrame objects.
+    :param ground_truth_poses: List of 4x4 numpy arrays representing the ground truth poses.
+    :return: RMSE value.
+    """
+    errors = []
+    for keyframe in estimated_keyframes:
+        # Use `id` as the index for ground truth
+        gt_pose = ground_truth_poses[keyframe.id]
+        est_translation = keyframe.pose[:3, 3]
+        gt_translation = gt_pose[:3, 3]
+        translation_error = np.linalg.norm(est_translation - gt_translation)
+        errors.append(translation_error)
+    rmse = np.sqrt(np.mean(np.array(errors) ** 2))
+    return rmse
 
 
 def main():
@@ -40,23 +56,27 @@ def main():
     K = calibration_matrices.get('P0')
     pose_estimator = PoseEstimator(K)
     keyframe_manager = KeyframeManager()
+    sparse_mapping = SparseMapping(K)
     visualizer = Visualizer()
 
     # Load ground truth poses
     ground_truth_poses = load_ground_truth_poses(ground_truth_file)
 
     # Initialize tracking variables
-    prev_keypoints, prev_descriptors = None, None
+    keypoints1, descriptors1 = feature_extractor.extract(image_loader.load_image(0))
+    prev_keypoints, prev_descriptors = keypoints1, descriptors1
     prev_pose = np.eye(4)  # Identity pose
     estimated_poses = [prev_pose]
 
+
     # Add the initial pose as a keyframe
-    initial_keyframe = KeyFrame(id=0, pose=prev_pose, keypoints=None, descriptors=None)
+    initial_keyframe = KeyFrame(id=0, pose=prev_pose, keypoints=keypoints1, descriptors=descriptors1)
     keyframe_manager.add_keyframe(initial_keyframe)
+    sparse_mapping.add_keyframe(initial_keyframe)
     print(f"Added initial keyframe at frame 0.")
 
     # Process frames
-    num_frames_to_process = 1000
+    num_frames_to_process = 25
     for frame_id in range(1, num_frames_to_process):
         current_image = image_loader.load_image(frame_id)
 
@@ -64,29 +84,40 @@ def main():
         keypoints, descriptors = feature_extractor.extract(current_image)
 
         # Match features
-        if prev_descriptors is not None:
-            matches = feature_matcher.match(prev_descriptors, descriptors)
-            filtered_matches = feature_matcher.filter_matches(matches, prev_keypoints, keypoints)
+        matches = feature_matcher.match(prev_descriptors, descriptors)
+        filtered_matches = feature_matcher.filter_matches(matches, prev_keypoints, keypoints)
 
             # Estimate pose
-            try:
-                R, t, _ = pose_estimator.estimate_pose(prev_keypoints, keypoints, filtered_matches)
-                current_pose = np.eye(4)
-                current_pose[:3, :3] = np.dot(R, prev_pose[:3, :3])
-                current_pose[:3, 3] = prev_pose[:3, :3].dot(t).flatten() + prev_pose[:3, 3]
+        try:
+            R, t, _ = pose_estimator.estimate_pose(prev_keypoints, keypoints, filtered_matches)
+            current_pose = np.eye(4)
+            current_pose[:3, :3] = np.dot(R, prev_pose[:3, :3])
+            current_pose[:3, 3] = prev_pose[:3, :3].dot(t).flatten() + prev_pose[:3, 3]
 
-                estimated_poses.append(current_pose)
+            estimated_poses.append(current_pose)
 
-                # Check if the current frame should be a keyframe
-                last_keyframe = keyframe_manager.get_last_keyframe()
-                if last_keyframe is not None:
-                    if keyframe_manager.is_new_keyframe(current_pose, last_keyframe.pose, len(filtered_matches)):
-                        new_keyframe = KeyFrame(id=frame_id, pose=current_pose, keypoints=keypoints, descriptors=descriptors)
-                        keyframe_manager.add_keyframe(new_keyframe)
-                        print(f"Added keyframe at frame {frame_id}.")
+            # Check if the current frame should be a keyframe
+            last_keyframe = keyframe_manager.get_last_keyframe()
+            if last_keyframe is not None:
+                if keyframe_manager.is_new_keyframe(current_pose, last_keyframe.pose, len(filtered_matches)):
+                    new_keyframe = KeyFrame(id=frame_id, pose=current_pose, keypoints=keypoints, descriptors=descriptors)
+                    keyframe_manager.add_keyframe(new_keyframe)
+                    sparse_mapping.add_keyframe(new_keyframe)
 
-                prev_pose = current_pose
-            except ValueError as e:
+                    # Triangulate points between last two keyframes
+                    if len(keyframe_manager.keyframes) > 1:
+                        keyframe1 = keyframe_manager.keyframes[-2]
+                        keyframe2 = keyframe_manager.keyframes[-1]
+                        new_map_points = sparse_mapping.triangulate_points(
+                            keyframe1, keyframe2, filtered_matches, R, t
+                        )
+                        # print(f"Triangulated {len(new_map_points)} map points.")
+
+            prev_pose = current_pose
+            # Print tracking stability details
+            print(f"Frame {frame_id}: Matches={len(filtered_matches)}, KeyFrames={len(keyframe_manager.keyframes)}, MapPoints={len(sparse_mapping.map_points)}")
+
+        except ValueError as e:
                 print(f"Pose estimation failed at frame {frame_id}: {e}")
 
         # Update previous frame data
@@ -94,7 +125,12 @@ def main():
 
     # Visualize the trajectory
     visualizer.plot_trajectory_xz(estimated_poses)
-    print(f"Number of keyframes: {len(keyframe_manager.keyframes)}")
+    # print(f"Number of keyframes: {len(keyframe_manager.keyframes)}")
+    # print(f"Total number of 3D map points stored: {len(sparse_mapping.map_points)}")
+    # for keyframe in keyframe_manager.keyframes:
+        # print(f"KeyFrame {keyframe.id} observes {keyframe.num_observations()} map points.")
+    rmse = compute_rmse(keyframe_manager.keyframes, ground_truth_poses)
+    print(f"RMSE of the trajectory: {rmse:.4f}")
 
 
 if __name__ == "__main__":

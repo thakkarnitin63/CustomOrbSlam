@@ -1,16 +1,39 @@
 import numpy as np
 import cv2
 from sklearn.cluster import DBSCAN
+from scipy.spatial import KDTree
 
 class SparseMapping:
     def __init__(self, camera_matrix):
         self.camera_matrix = camera_matrix
         self.map_points = []  # List to store MapPoint objects
         self.keyframes = []   # List to store KeyFrame objects
+        self.kd_tree = None
 
     def add_keyframe(self, keyframe):
         self.keyframes.append(keyframe)
-        print(f"Added keyframe at frame {keyframe.id}.")
+        # print(f"Added keyframe at frame {keyframe.id}.")
+
+    def update_kd_tree(self):
+        """ Rebuilds the KD-Tree after adding new MapPoints. """
+        if len(self.map_points) > 0:
+            self.kd_tree = KDTree([mp.position for mp in self.map_points])
+
+
+    def find_nearest_map_point(self, new_point, threshold=0.05):
+        """
+        Searches for a nearby existing MapPoint using KD-Tree.
+        :param new_point: The 3D coordinates of the point to check.
+        :param threshold: Distance threshold to consider a duplicate.
+        :return: Closest MapPoint if found, else None.
+        """
+        if self.kd_tree is None or len(self.map_points) == 0:
+            return None
+        
+        dist, index = self.kd_tree.query(new_point)
+        if dist < threshold:
+            return self.map_points[index]
+        return None
 
     def triangulate_points(self, keyframe1, keyframe2, matches, R, t, dbscan_eps=7, dbscan_min_samples=5):
         """
@@ -60,15 +83,24 @@ class SparseMapping:
         # Create MapPoint objects
         new_map_points = []
         for i, point in enumerate(filtered_points_3d):
-            map_point = MapPoint(
-                position=point,
-                observations={keyframe1.id: filtered_points1[i], keyframe2.id: filtered_points2[i]},
-                descriptors=None  # Add descriptor pooling if available
-            )
-            new_map_points.append(map_point)
-            self.map_points.append(map_point)
+            existing_mp = self.find_nearest_map_point(point)
+            if existing_mp is None:  # No duplicate found, create a new MapPoint
+                map_point = MapPoint(
+                    position=point,
+                    observations={keyframe1.id: filtered_points1[i], keyframe2.id: filtered_points2[i]},
+                    descriptors=None  # Add descriptor pooling if available
+                )
+                new_map_points.append(map_point)
+                self.map_points.append(map_point)
+            else:
+                # (Optional) Merge observations if close enough
+                existing_mp.add_observation(keyframe1.id, filtered_points1[i])
+                existing_mp.add_observation(keyframe2.id, filtered_points2[i])
 
-        print(f"Triangulated {len(new_map_points)} valid 3D points between KeyFrame {keyframe1.id} and {keyframe2.id}.")
+        # Update KD-Tree after adding new MapPoints
+        self.update_kd_tree()
+
+        # print(f"Triangulated {len(new_map_points)} valid 3D points between KeyFrame {keyframe1.id} and {keyframe2.id}.")
 
         # Add observations to KeyFrames
         keyframe1.add_observation(new_map_points, filtered_points1)
@@ -91,6 +123,13 @@ class MapPoint:
     def add_observation(self, keyframe_id, keypoint):
         """Adds a new observation to the MapPoint."""
         self.observations[keyframe_id] = keypoint
+
+    def merge_descriptors(self, new_descriptor): # OPTIONAL
+        """ (Optional) Merges a new descriptor into the current descriptor. """
+        if self.descriptors is None:
+            self.descriptors = new_descriptor
+        else:
+            self.descriptors = (self.descriptors + new_descriptor) / 2  # Simple averaging
 
 class KeyFrame:
     def __init__(self, id, pose, keypoints, descriptors):
