@@ -5,10 +5,12 @@ from collections import deque
 class KeyframeManager:
     def __init__(self, translation_threshold=2.0, rotation_threshold=np.deg2rad(10), min_feature_matches=100):
         """
-        Initializes the keyframe manager with thresholds for selection criteria.
-        :param translation_threshold: Minimum translation change required to add a keyframe.
-        :param rotation_threshold: Minimum rotation change (in radians) required to add a keyframe.
-        :param min_feature_matches: Minimum number of feature matches required to avoid adding a new keyframe.
+        Initializes the keyframe manager with selection criteria.
+        
+        Args:
+            translation_threshold (float): Minimum translation change required.
+            rotation_threshold (float): Minimum rotation change (in radians) required.
+            min_feature_matches (int): Minimum number of feature matches required.
         """
         self.translation_threshold = translation_threshold
         self.rotation_threshold = rotation_threshold
@@ -19,11 +21,15 @@ class KeyframeManager:
 
     def is_new_keyframe(self, current_pose, last_keyframe_pose, num_feature_matches):
         """
-        Checks whether the current frame should be selected as a new keyframe.
-        :param current_pose: 4x4 pose matrix of the current frame.
-        :param last_keyframe_pose: 4x4 pose matrix of the last keyframe.
-        :param num_feature_matches: Number of feature matches with the last keyframe.
-        :return: True if the current frame should be a new keyframe, False otherwise.
+        Determines if the current frame qualifies as a new keyframe.
+        
+        Args:
+            current_pose (np.ndarray): 4x4 pose matrix of the current frame.
+            last_keyframe_pose (np.ndarray): 4x4 pose matrix of the last keyframe.
+            num_feature_matches (int): Number of feature matches with the last keyframe.
+            
+        Returns:
+            bool: True if the frame should be a new keyframe, False otherwise.
         """
         # Translation and rotation change
         translation_vector = current_pose[:3, 3] - last_keyframe_pose[:3, 3]
@@ -43,11 +49,9 @@ class KeyframeManager:
         )
 
     def add_keyframe(self, keyframe):
-        """
-        Adds the current pose to the list of keyframes.
-        :param keyframe: KeyFrame object containing pose, keypoints, and descriptors
-        """
+        """Adds a keyframe to the manager."""
         self.keyframes.append(keyframe)
+        print(f"Adding the Keyframe with frame id {keyframe.id}")
         self.recent_keyframes.append(keyframe)
 
     def get_last_keyframe(self):

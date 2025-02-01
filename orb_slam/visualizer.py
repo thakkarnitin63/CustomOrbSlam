@@ -65,23 +65,26 @@ class Visualizer:
 
     def visualize_trajectory(self, estimated_poses, ground_truth_poses):
         """
-        Visualize the estimated and ground truth trajectories in 2D.
-        :param estimated_poses: List of 4x4 numpy arrays of estimated poses.
-        :param ground_truth_poses: List of 4x4 numpy arrays of ground truth poses.
+        Visualizes the estimated and ground truth trajectories in the XZ plane.
+        
+        Args:
+            estimated_poses (list): List of 4x4 pose matrices (estimated).
+            ground_truth_poses (list): List of 4x4 pose matrices (ground truth).
         """
-        # Extract x, y coordinates from poses
-        estimated_xy = np.array([pose[:2, 3] for pose in estimated_poses])
-        ground_truth_xy = np.array([pose[:2, 3] for pose in ground_truth_poses])
+        est_x = [pose[0, 3] for pose in estimated_poses]
+        est_z = [pose[2, 3] for pose in estimated_poses]
+        gt_x = [pose[0, 3] for pose in ground_truth_poses]
+        gt_z = [pose[2, 3] for pose in ground_truth_poses]
 
-        # Plot trajectories
         plt.figure(figsize=(10, 8))
-        plt.plot(ground_truth_xy[:, 0], ground_truth_xy[:, 1], label="Ground Truth", color='blue', linestyle='--')
-        plt.plot(estimated_xy[:, 0], estimated_xy[:, 1], label="Estimated", color='red')
-        plt.title("2D Trajectory Visualization")
-        plt.xlabel("X Coordinate")
-        plt.ylabel("Y Coordinate")
+        plt.plot(gt_x, gt_z, label="Ground Truth", color='blue', linestyle='--')
+        plt.plot(est_x, est_z, label="Estimated", color='red')
+        plt.title("Trajectory Comparison (X-Z Plane)")
+        plt.xlabel("X Position")
+        plt.ylabel("Z Position")
         plt.legend()
-        plt.grid()
+        plt.grid(True)
+        plt.axis('equal')
         plt.show()
 
     def plot_trajectory_xz(self, poses):

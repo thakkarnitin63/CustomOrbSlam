@@ -2,191 +2,142 @@ import numpy as np
 import cv2
 from sklearn.cluster import DBSCAN
 from scipy.spatial import KDTree
-import g2o
+import gtsam
+from gtsam import symbol
+from gtsam.utils import plot
+from scipy.spatial.transform import Rotation as R
+
 
 class SparseMapping:
     def __init__(self, camera_matrix):
+        """
+        Initializes the sparse mapping module.
+        
+        Args:
+            camera_matrix (np.ndarray): The camera intrinsic matrix.
+        """
         self.camera_matrix = camera_matrix
         self.map_points = []  # List to store MapPoint objects
         self.keyframes = []   # List to store KeyFrame objects
         self.kd_tree = None
 
     def add_keyframe(self, keyframe):
+        """Adds a keyframe to the mapping module."""
         self.keyframes.append(keyframe)
-        # print(f"Added keyframe at frame {keyframe.id}.")
+
 
     def update_kd_tree(self):
         """ Rebuilds the KD-Tree after adding new MapPoints. """
-        if len(self.map_points) > 0:
+        if self.map_points:
             self.kd_tree = KDTree([mp.position for mp in self.map_points])
 
 
     def find_nearest_map_point(self, new_point, threshold=0.05):
         """
-        Searches for a nearby existing MapPoint using KD-Tree.
-        :param new_point: The 3D coordinates of the point to check.
-        :param threshold: Distance threshold to consider a duplicate.
-        :return: Closest MapPoint if found, else None.
+        Searches for an existing MapPoint near the new point.
+        
+        Args:
+            new_point (np.ndarray): 3D point to check.
+            threshold (float): Distance threshold.
+            
+        Returns:
+            MapPoint or None: The nearest MapPoint if within threshold; otherwise, None.
         """
-        if self.kd_tree is None or len(self.map_points) == 0:
+        if self.kd_tree is None or not self.map_points:
             return None
-        
         dist, index = self.kd_tree.query(new_point)
-        if dist < threshold:
-            return self.map_points[index]
-        return None
+        return self.map_points[index] if dist < threshold else None
     
-    def local_bundle_adjustment(self, recent_keyframe, connected_keyframes):
+
+
+    def triangulate_points(self, keyframe1, keyframe2, matches, R, t,
+                             dbscan_eps=7, dbscan_min_samples=5):
         """
-        Perform Local Bundle Adjustment for recent and connected keyframes.
-        :param recent_keyframe: The most recently added keyframe.
-        :param connected_keyframes: List of keyframes connected to the recent keyframe.
-        """
+        Triangulates 3D points from matches between two keyframes.
         
-
-        # Initialize the linear solver
-        optimizer = g2o.SparseOptimizer()
-        solver = g2o.BlockSolverSE3(g2o.LinearSolverCholmodSE3())
-        solver = g2o.OptimizationAlgorithmLevenberg(solver)
-        optimizer.set_algorithm(solver)
-
-        # Add recent keyframe as a vertex
-        recent_vertex = g2o.VertexSE3Expmap()
-        recent_vertex.set_id(recent_keyframe.id)
-        recent_vertex.set_estimate(g2o.SE3Quat(recent_keyframe.pose[:3, :3], recent_keyframe.pose[:3, 3]))
-        optimizer.add_vertex(recent_vertex)
-
-        # Add connected keyframes as vertices
-        keyframe_vertices = {}
-        for kf in connected_keyframes:
-            vertex = g2o.VertexSE3Expmap()
-            vertex.set_id(kf.id)
-            vertex.set_estimate(g2o.SE3Quat(kf.pose[:3, :3], kf.pose[:3, 3]))
-            vertex.set_fixed(True)  # Keep connected keyframes fixed
-            optimizer.add_vertex(vertex)
-            keyframe_vertices[kf.id] = vertex
-
-        # Add map points as vertices
-        point_id_offset = 1000  # Offset to ensure unique IDs for map points
-        for i, mp in enumerate(self.map_points):
-            if any(kf.id in mp.observations for kf in [recent_keyframe] + connected_keyframes):
-                vertex = g2o.VertexPointXYZ() # Updated class name
-                vertex_id = point_id_offset + i
-                vertex.set_id(vertex_id)
-                vertex.set_estimate(mp.position)
-                optimizer.add_vertex(vertex)
-
-                # Add edges for observations
-                for kf_id, point_2d in mp.observations.items():
-                    if kf_id in keyframe_vertices:
-                        edge = g2o.EdgeProjectXYZ2UV()
-                        edge.set_vertex(0, vertex)  # Map point
-                        edge.set_vertex(1, keyframe_vertices[kf_id])  # Keyframe
-                        edge.set_measurement(point_2d)  # Observed 2D point
-                        edge.set_information(np.eye(2))  # Weight matrix
-                        edge.set_robust_kernel(g2o.RobustKernelHuber())
-                        optimizer.add_edge(edge)
-
-        # Optimize
-        print(f"Running Local Bundle Adjustment...")
-        optimizer.initialize_optimization()
-        optimizer.optimize(10)  # Perform 10 iterations
-
-        # Update keyframes and map points
-        recent_keyframe.pose = recent_vertex.estimate().matrix()
-        for i, mp in enumerate(self.map_points):
-            vertex_id = point_id_offset + i
-            if vertex_id in optimizer.vertices():
-                mp.position = optimizer.vertex(vertex_id).estimate()
-        
-
-    def triangulate_points(self, keyframe1, keyframe2, matches, R, t, dbscan_eps=7, dbscan_min_samples=5):
-        """
-        Triangulates 3D points from matched keypoints and relative pose between two keyframes.
-        Applies DBSCAN clustering to filter noise and prevents duplicate MapPoint creation.
-
-        :param keyframe1: First KeyFrame object.
-        :param keyframe2: Second KeyFrame object.
-        :param matches: List of matched keypoints between the two keyframes.
-        :param R: Rotation matrix from keyframe1 to keyframe2.
-        :param t: Translation vector from keyframe1 to keyframe2.
-        :param dbscan_eps: DBSCAN neighborhood radius.
-        :param dbscan_min_samples: Minimum samples for a point to be considered a core point in DBSCAN.
-        :return: List of newly added MapPoint objects.
+        Args:
+            keyframe1: First keyframe.
+            keyframe2: Second keyframe.
+            matches: List of matched keypoints between the keyframes.
+            R (np.ndarray): Rotation matrix from keyframe1 to keyframe2.
+            t (np.ndarray): Translation vector from keyframe1 to keyframe2.
+            dbscan_eps (float): DBSCAN neighborhood radius.
+            dbscan_min_samples (int): Minimum samples for DBSCAN core point.
+            
+        Returns:
+            list: Newly added MapPoint objects.
         """
         # Extract matched keypoints
         points1 = np.float32([keyframe1.keypoints[m.queryIdx].pt for m in matches])
         points2 = np.float32([keyframe2.keypoints[m.trainIdx].pt for m in matches])
 
         # Projection matrices
-        P1 = np.dot(self.camera_matrix, np.hstack((np.eye(3), np.zeros((3, 1)))))
-        P2 = np.dot(self.camera_matrix, np.hstack((R, t)))
+        P1 = self.camera_matrix @ np.hstack((np.eye(3), np.zeros((3, 1))))
+        P2 = self.camera_matrix @ np.hstack((R, t))
 
-        # Triangulate points
+        # Triangulate
         points_4d = cv2.triangulatePoints(P1, P2, points1.T, points2.T)
+        points_3d = (points_4d[:3, :] / points_4d[3, :]).T
 
-        # Convert to inhomogeneous coordinates
-        points_3d = points_4d[:3, :] / points_4d[3, :]
-        points_3d = points_3d.T  # Shape: (N, 3)
+        # Filter points in front of the camera
+        valid_idx = points_3d[:, 2] > 0
+        points_3d = points_3d[valid_idx]
+        valid_points1 = points1[valid_idx]
+        valid_points2 = points2[valid_idx]
 
-        # Filter points in front of both cameras
-        valid_indices = (points_3d[:, 2] > 0)  # Z > 0 for front-of-camera points
-        points_3d = points_3d[valid_indices]
-        valid_points1 = points1[valid_indices]
-        valid_points2 = points2[valid_indices]
-
-        # Apply DBSCAN to filter out noisy points
+        # DBSCAN filtering to remove noise
         clustering = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples).fit(points_3d)
         labels = clustering.labels_
+        idx = (labels != -1)
+        filtered_points_3d = points_3d[idx]
+        filtered_points1 = valid_points1[idx]
+        filtered_points2 = valid_points2[idx]
 
-        # Retain only non-noise points
-        valid_indices = np.where(labels != -1)[0]
-        filtered_points_3d = points_3d[valid_indices]
-        filtered_points1 = valid_points1[valid_indices]
-        filtered_points2 = valid_points2[valid_indices]
-
-        # Create MapPoint objects
         new_map_points = []
         for i, point in enumerate(filtered_points_3d):
             existing_mp = self.find_nearest_map_point(point)
-            if existing_mp is None:  # No duplicate found, create a new MapPoint
+            if existing_mp is None:
+                # Use the descriptor from keyframe1 corresponding to this point.
+                descriptor = keyframe1.descriptors[i] if i < len(keyframe1.descriptors) else None
+
                 map_point = MapPoint(
                     position=point,
                     observations={keyframe1.id: filtered_points1[i], keyframe2.id: filtered_points2[i]},
-                    descriptors=None  # Add descriptor pooling if available
+                    descriptors = descriptor
                 )
                 new_map_points.append(map_point)
                 self.map_points.append(map_point)
             else:
-                # (Optional) Merge observations if close enough
                 existing_mp.add_observation(keyframe1.id, filtered_points1[i])
                 existing_mp.add_observation(keyframe2.id, filtered_points2[i])
 
-        # Update KD-Tree after adding new MapPoints
         self.update_kd_tree()
-
-        # print(f"Triangulated {len(new_map_points)} valid 3D points between KeyFrame {keyframe1.id} and {keyframe2.id}.")
-
-        # Add observations to KeyFrames
         keyframe1.add_observation(new_map_points, filtered_points1)
         keyframe2.add_observation(new_map_points, filtered_points2)
-
         return new_map_points
 
 class MapPoint:
     def __init__(self, position, observations=None, descriptors=None):
         """
         Represents a 3D point in the map.
-        :param position: 3D coordinates of the point.
-        :param observations: Dictionary of {keyframe_id: 2D point in the image}.
-        :param descriptors: Optional aggregated descriptor for the point.
+        
+        Attributes:
+            position (np.ndarray): 3D coordinates of the point.
+            observations (dict): Dictionary mapping keyframe IDs to 2D points in the image.
+            descriptors (np.ndarray): Optional aggregated descriptor for the point.
         """
         self.position = np.array(position)
         self.observations = observations if observations else {}
         self.descriptors = descriptors
 
     def add_observation(self, keyframe_id, keypoint):
-        """Adds a new observation to the MapPoint."""
+        """
+        Adds a new observation to the MapPoint.
+        
+        Args:
+            keyframe_id (int): Identifier of the keyframe.
+            keypoint: 2D point in the image.
+        """
         self.observations[keyframe_id] = keypoint
 
     def merge_descriptors(self, new_descriptor): # OPTIONAL
