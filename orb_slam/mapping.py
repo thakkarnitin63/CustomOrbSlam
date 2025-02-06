@@ -23,6 +23,7 @@ class SparseMapping:
 
     def add_keyframe(self, keyframe):
         """Adds a keyframe to the mapping module."""
+        print(f"New keyframe added to SparseMapping {keyframe.id}")
         self.keyframes.append(keyframe)
 
 
@@ -93,6 +94,9 @@ class SparseMapping:
         filtered_points1 = valid_points1[idx]
         filtered_points2 = valid_points2[idx]
 
+        
+
+
         new_map_points = []
         for i, point in enumerate(filtered_points_3d):
             existing_mp = self.find_nearest_map_point(point)
@@ -110,6 +114,8 @@ class SparseMapping:
             else:
                 existing_mp.add_observation(keyframe1.id, filtered_points1[i])
                 existing_mp.add_observation(keyframe2.id, filtered_points2[i])
+
+        print(f"Frame {keyframe2.id}: Total 3D points after triangulation: {len(self.map_points)}")
 
         self.update_kd_tree()
         keyframe1.add_observation(new_map_points, filtered_points1)

@@ -66,63 +66,62 @@ class PoseEstimator:
     
 
     def estimate_pose_pnp(self, map_points, current_keyframe, matcher=None, min_inliers=10):
-        """
-        Estimates the camera pose using PnP with RANSAC from 2D–3D correspondences.
-        This method uses the KeyFrame object for the current frame and a list of MapPoint objects
-        (which already contain 3D positions and descriptors).
-        
-        Args:
-            map_points (list): List of MapPoint objects with valid descriptors.
-            current_keyframe (KeyFrame): A KeyFrame object representing the current frame.
-            matcher: (Optional) A feature matcher. If None, a BFMatcher is initialized internally.
-            min_inliers (int): Minimum number of inlier correspondences required.
-            
-        Returns:
-            tuple: (R, t) where R is a 3x3 rotation matrix and t is a 3x1 translation vector.
-            
-        Raises:
-            ValueError: If not enough 2D–3D correspondences are found or if PnP fails.
-        """
         object_points = []
         image_points = []
         
-        # Gather descriptors and corresponding map points.
         map_descriptors = []
         valid_map_points = []
+        
         for mp in map_points:
             if mp.descriptors is not None:
                 map_descriptors.append(mp.descriptors)
                 valid_map_points.append(mp)
-                
+        
         if len(map_descriptors) == 0:
             raise ValueError("No map point descriptors available for PnP.")
-        
+
         map_descriptors = np.array(map_descriptors)
-        
-        # Initialize matcher internally if not provided.
+
+        # Use KNN Matching with Ratio Test
         if matcher is None:
-            matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        
-        # Match descriptors between map points and the current keyframe.
-        raw_matches = matcher.match(map_descriptors, current_keyframe.descriptors)
-        
+            matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+
+        knn_matches = matcher.knnMatch(map_descriptors, current_keyframe.descriptors, k=2)
+
+        # Apply Lowe's Ratio Test
+        good_matches = []
+        ratio_thresh = 0.75
+        for m, n in knn_matches:
+            if m.distance < ratio_thresh * n.distance:
+                good_matches.append(m)
+
         # Collect correspondences.
-        for m in raw_matches:
+        for m in good_matches:
             object_points.append(valid_map_points[m.queryIdx].position)
             image_points.append(current_keyframe.keypoints[m.trainIdx].pt)
-        
+
+        print(f"[PnP Debug] Frame {current_keyframe.id}: Found {len(object_points)} 3D-2D correspondences.")
+
+        # ** Debugging Print Statements **
+        print(f"3D Points (Object Points) Sample: {np.array(object_points[:5])}")  # Print first 5 3D points
+        print(f"2D Points (Image Points) Sample: {np.array(image_points[:5])}")  # Print first 5 2D points
+
         if len(object_points) < min_inliers:
-            raise ValueError("Not enough 2D–3D correspondences for PnP.")
-        
+            raise ValueError(f"PnP failed: Not enough correspondences ({len(object_points)})")
+
         object_points = np.array(object_points, dtype=np.float32)
         image_points = np.array(image_points, dtype=np.float32)
-        
+
+        # Solve PnP with a looser RANSAC threshold
         success, rvec, tvec, inliers = cv2.solvePnPRansac(object_points, image_points,
-                                                           self.camera_matrix, self.dist_coeffs,
-                                                           flags=cv2.SOLVEPNP_ITERATIVE)
+                                                   self.camera_matrix, self.dist_coeffs,
+                                                   reprojectionError=8.0,  # Loosen threshold
+                                                   flags=cv2.SOLVEPNP_AP3P)  # More robust method
         if not success or inliers is None or len(inliers) < min_inliers:
-            raise ValueError("PnP failed or not enough inliers.")
-        
+            print(f"[PnP Debug] Frame {current_keyframe.id}: Only {len(inliers) if inliers is not None else 0} inliers found.")
+            print(f"Reprojection Threshold: 8.0 (Consider adjusting further)")
+            raise ValueError("PnP failed: No inliers found.")
+
         R, _ = cv2.Rodrigues(rvec)
         return R, tvec
 

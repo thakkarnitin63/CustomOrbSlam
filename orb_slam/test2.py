@@ -4,11 +4,7 @@ import matplotlib.pyplot as plt
 
 from orb_slam.image_loader import ImageLoader
 from orb_slam.feature_extractor import FeatureExtractor
-from orb_slam.feature_matcher import FeatureMatcher
-from orb_slam.pose_estimator import PoseEstimator
-from orb_slam.visualizer import Visualizer
-from orb_slam.keyframe_manager import KeyframeManager
-from orb_slam.mapping import SparseMapping, KeyFrame  # MapPoint is used internally in SparseMapping
+
 
 def load_ground_truth_poses(file_path):
     """
@@ -36,105 +32,18 @@ def main():
 
     # Initialize system components
     image_loader = ImageLoader(sequence_path)
-    feature_extractor = FeatureExtractor()
-    feature_matcher = FeatureMatcher(ratio_thresh=0.75)
-    calibration_matrices = image_loader._load_calibration()
-    K = calibration_matrices.get('P0')
-    pose_estimator = PoseEstimator(K)
-    keyframe_manager = KeyframeManager()
-    sparse_mapping = SparseMapping(K)
-    visualizer = Visualizer()
+    sample_image =image_loader.load_image(99)
+    feature_extractor = FeatureExtractor(sample_image)
 
-    # Load ground truth poses (for trajectory visualization)
-    ground_truth_poses = load_ground_truth_poses(ground_truth_file)
+    keypoints, descriptors = feature_extractor.extract(sample_image)
 
-    # --- Initialization (Frame 0) ---
-    first_image = image_loader.load_image(0)
-    keypoints1, descriptors1 = feature_extractor.extract(first_image)
-    prev_keypoints, prev_descriptors = keypoints1, descriptors1
-    prev_pose = np.eye(4)
-    estimated_poses = [prev_pose]
+    print(len(keypoints))
 
-    # Create and add the initial keyframe.
-    initial_kf = KeyFrame(id=0, pose=prev_pose, keypoints=keypoints1, descriptors=descriptors1)
-    keyframe_manager.add_keyframe(initial_kf)
-    sparse_mapping.add_keyframe(initial_kf)
-    print("Added initial keyframe (frame 0).")
+    img_keypoints = cv2.drawKeypoints(sample_image, keypoints, None, color=(0, 255, 0))
+    cv2.imshow("Keypoints", img_keypoints)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
-    num_frames = 500
-    for frame_id in range(1, num_frames):
-        current_image = image_loader.load_image(frame_id)
-        keypoints, descriptors = feature_extractor.extract(current_image)
-
-        # Feature matching between previous frame and current frame.
-        matches = feature_matcher.match(prev_descriptors, descriptors)
-        filtered_matches = feature_matcher.filter_matches(matches, prev_keypoints, keypoints)
-
-        try:
-            # --- Pose Estimation (Tracking) ---
-            # Use PnP if enough MapPoints (with descriptors) are available.
-            if len(sparse_mapping.map_points) > 50:
-                # Wrap current frame as a temporary KeyFrame.
-                current_kf = KeyFrame(id=frame_id, pose=None, keypoints=keypoints, descriptors=descriptors)
-                try:
-                    R_pnp, t_pnp = pose_estimator.estimate_pose_pnp(sparse_mapping.map_points, current_kf)
-                    T_rel = np.eye(4)
-                    T_rel[:3, :3] = R_pnp
-                    T_rel[:3, 3] = t_pnp.flatten()
-                    # Use forward composition with the PnP result.
-                    current_pose = prev_pose @ T_rel
-                    print(f"Frame {frame_id}: Pose estimated using PnP.")
-                except Exception as e_pnp:
-                    print(f"Frame {frame_id}: PnP failed ({e_pnp}); falling back to essential matrix.")
-                    R_em, t_em, _ = pose_estimator.estimate_pose(prev_keypoints, keypoints, filtered_matches)
-                    T_rel = np.eye(4)
-                    T_rel[:3, :3] = R_em
-                    T_rel[:3, 3] = t_em.flatten()
-                    # Here, we use the inverse composition branch for the essential matrix.
-                    current_pose = prev_pose @ np.linalg.inv(T_rel)
-                    print(f"Frame {frame_id}: Pose estimated using essential matrix fallback.")
-            else:
-                # Not enough map points: use the essential matrix method.
-                R_em, t_em, _ = pose_estimator.estimate_pose(prev_keypoints, keypoints, filtered_matches)
-                T_rel = np.eye(4)
-                T_rel[:3, :3] = R_em
-                T_rel[:3, 3] = t_em.flatten()
-                current_pose = prev_pose @ np.linalg.inv(T_rel)
-                print(f"Frame {frame_id}: Pose estimated using essential matrix.")
-
-            estimated_poses.append(current_pose)
-
-            # --- Keyframe Insertion and Mapping ---
-            last_kf = keyframe_manager.get_last_keyframe()
-            # Use your keyframe insertion criteria (e.g., translation/rotation threshold, or few feature matches)
-            if last_kf is not None and keyframe_manager.is_new_keyframe(current_pose, last_kf.pose, len(filtered_matches)):
-                # Create and add new keyframe.
-                new_kf = KeyFrame(id=frame_id, pose=current_pose, keypoints=keypoints, descriptors=descriptors)
-                keyframe_manager.add_keyframe(new_kf)
-                sparse_mapping.add_keyframe(new_kf)
-                print(f"Frame {frame_id}: New keyframe inserted.")
-
-                # --- Triangulation ---
-                # Re-match features between the last keyframe and the new keyframe.
-                kf_matches = feature_matcher.match(last_kf.descriptors, new_kf.descriptors)
-                kf_filtered_matches = feature_matcher.filter_matches(kf_matches, last_kf.keypoints, new_kf.keypoints)
-                # Compute the relative transformation between keyframes.
-                T_rel_kf = np.linalg.inv(last_kf.pose) @ new_kf.pose
-                R_rel = T_rel_kf[:3, :3]
-                t_rel = T_rel_kf[:3, 3].reshape(3, 1)
-                # Triangulate new map points.
-                new_map_points = sparse_mapping.triangulate_points(last_kf, new_kf, kf_filtered_matches, R_rel, t_rel)
-                print(f"Frame {frame_id}: Triangulated {len(new_map_points)} new map points.")
-
-            prev_pose = current_pose
-
-        except ValueError as e:
-            print(f"Frame {frame_id}: Pose estimation failed: {e}")
-
-        # Update previous frame data.
-        prev_keypoints, prev_descriptors = keypoints, descriptors
-
-    visualizer.visualize_trajectory(estimated_poses, ground_truth_poses[:num_frames])
 
 if __name__ == "__main__":
     main()
