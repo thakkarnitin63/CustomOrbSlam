@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 class FeatureExtractor:
-    def __init__(self, sample_image, scaleFactor=1.2, nlevels=8, iniThFAST=20, minThFAST=5, grid_size=(8, 8)):
+    def __init__(self, sample_image, scaleFactor=1.2, nlevels=8, iniThFAST=15, minThFAST=3, grid_size=(4, 13)):
         """
         Initializes the FeatureExtractor with parameters from the ORB-SLAM paper.
         """
@@ -34,51 +34,49 @@ class FeatureExtractor:
             fastThreshold=iniThFAST
         )
 
-        # Initialize CLAHE for contrast enhancement
-        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-
     def extract(self, image):
         """
-        Detects FAST keypoints in a grid-based approach ensuring homogeneous distribution.
+        Detects FAST keypoints ensuring even distribution.
         """
-        # Apply CLAHE to enhance contrast
-        image = self.clahe.apply(image)
-
         h, w = image.shape
         keypoints = []
+
+        # STEP 1: Detect keypoints in the full image FIRST
+        full_keypoints = cv2.FastFeatureDetector_create(threshold=self.iniThFAST, nonmaxSuppression=True).detect(image)
+
+        # STEP 2: Divide the image into a grid and enforce per-cell keypoints
         grid_rows, grid_cols = self.grid_size
         cell_h, cell_w = h // grid_rows, w // grid_cols
 
+        final_keypoints = []
         for i in range(grid_rows):
             for j in range(grid_cols):
                 # Define cell region
                 x_start, y_start = j * cell_w, i * cell_h
-                x_end, y_end = x_start + cell_w, y_start + cell_h
-                cell_img = image[y_start:y_end, x_start:x_end]
+                x_end, y_end = min(x_start + cell_w, w), min(y_start + cell_h, h)
 
-                # Detect keypoints in cell with adaptive threshold
-                threshold = self.iniThFAST
-                detector = cv2.FastFeatureDetector_create(threshold=threshold, nonmaxSuppression=True)
-                cell_keypoints = detector.detect(cell_img)
+                # Select keypoints that fall inside this cell
+                cell_keypoints = [
+                    kp for kp in full_keypoints if x_start <= kp.pt[0] < x_end and y_start <= kp.pt[1] < y_end
+                ]
 
-                # If fewer than 5 keypoints, try lowering threshold dynamically
-                while len(cell_keypoints) < 5 and threshold >= self.minThFAST:
-                    threshold -= 5
-                    detector = cv2.FastFeatureDetector_create(threshold=threshold, nonmaxSuppression=True)
-                    cell_keypoints = detector.detect(cell_img)
-
-                # Adaptively allocate more keypoints to high-texture areas
-                max_kp_per_cell = int((self.nfeatures / (grid_rows * grid_cols)) * 2)  # Dynamic allocation
+                # Sort by response and take the strongest ones
+                max_kp_per_cell = max(10, int((self.nfeatures / (grid_rows * grid_cols)) * 2))
                 cell_keypoints = sorted(cell_keypoints, key=lambda kp: kp.response, reverse=True)[:max_kp_per_cell]
 
-                # Transform coordinates to global image space
-                for kp in cell_keypoints:
-                    kp.pt = (kp.pt[0] + x_start, kp.pt[1] + y_start)
-                    keypoints.append(kp)
+                # Append final keypoints
+                final_keypoints.extend(cell_keypoints)
 
-        # Compute ORB descriptors before final filtering
-        keypoints, descriptors = self.orb.compute(image, keypoints)
+        # STEP 3: Compute descriptors
+        keypoints, descriptors = self.orb.compute(image, final_keypoints)
 
-        # Keep only the strongest `self.nfeatures` keypoints globally
-        keypoints = sorted(keypoints, key=lambda kp: kp.response, reverse=True)[:self.nfeatures]
+        # If descriptors are None, return empty
+        if descriptors is None:
+            print("⚠️ No valid descriptors found.")
+            return [], None
+
+        # Ensure keypoints and descriptors count match
+        keypoints = keypoints[:len(descriptors)]
+
+        print(f"Final keypoints count: {len(keypoints)}, Descriptors shape: {descriptors.shape}")
         return keypoints, descriptors

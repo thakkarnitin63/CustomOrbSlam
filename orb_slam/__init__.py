@@ -5,7 +5,7 @@ from .image_loader import ImageLoader
 from .feature_extractor import FeatureExtractor
 from .feature_matcher import FeatureMatcher
 from .pose_estimator import PoseEstimator
-from .map_manager import MapManager
+# from .global_init_map import MapManager
 from .optimizer import Optimizer
 from .visualizer import Visualizer
 from .loop_closure_detector import LoopClosureDetector
@@ -18,7 +18,7 @@ __all__ = [
     'FeatureExtractor',
     'FeatureMatcher',
     'PoseEstimator',
-    'MapManager',
+    # 'MapManager',
     'Optimizer',
     'Visualizer',
     'LoopClosureDetector',
