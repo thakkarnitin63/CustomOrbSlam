@@ -11,11 +11,13 @@ class FeatureMatcher:
         self.orientation_thresh = orentation_thresh
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
-    def match(self, des1, des2):
+    def match(self, des1, des2, kp1, kp2):
         """
         Matches descriptors between two images using the BFMatcher and applies the ratio test.
         :param des1: Descriptors from the first image.
         :param des2: Descriptors from the second image.
+        :param kp1: Keypoints from first image.
+        :param kp2: Keypoints from second image.
         :return: List of filtered good matches.
         """
         # Perform k-nearest neighbors matching
@@ -26,23 +28,13 @@ class FeatureMatcher:
         good_matches = [
             m for m, n in knn_matches if m.distance < self.ratio_thresh * n.distance
         ]
-        return good_matches
-
-    def filter_matches(self, matches, keypoints1, keypoints2):
-        """
-        Filters matches based on orientation consistency.
-        :param matches: List of matches to filter.
-        :param keypoints1: Keypoints from the first image.
-        :param keypoints2: Keypoints from the second image.
-        :return: Filtered matches.
-        """
         filtered_matches = []
-        for match in matches:
-            kp1 = keypoints1[match.queryIdx]
-            kp2 = keypoints2[match.trainIdx]
+        for match in good_matches:
+            keyp1 = kp1[match.queryIdx]
+            keyp2 = kp2[match.trainIdx]
 
             # Calculate the angle difference between keypoints
-            angle_diff = abs(kp1.angle - kp2.angle)
+            angle_diff = abs(keyp1.angle - keyp2.angle)
             if angle_diff < self.orientation_thresh or abs(angle_diff - 360) < self.orientation_thresh:
                 filtered_matches.append(match)
 
