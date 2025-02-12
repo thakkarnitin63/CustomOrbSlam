@@ -20,9 +20,6 @@ class FeatureMatcher:
         """
         # Perform k-nearest neighbors matching
         knn_matches = self.bf.knnMatch(des1, des2, k=2)
-        print(f"Total matches found: {len(knn_matches)}")
-        print(f"Descriptor1 Shape: {des1.shape if des1 is not None else 'None'}")
-        print(f"Descriptor2 Shape: {des2.shape if des2 is not None else 'None'}")
 
 
         # Apply the ratio test to filter ambiguous matches
