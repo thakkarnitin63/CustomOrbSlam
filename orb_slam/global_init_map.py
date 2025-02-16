@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 
 class MapInitializer:
     def __init__(self, K, feature_extractor, feature_matcher):
@@ -78,21 +79,26 @@ class MapInitializer:
         Attempts to initialize the map from a reference image and a current image.
         
         Returns a dictionary containing:
-         - 'R': Recovered rotation matrix.
-         - 't': Recovered translation vector.
-         - 'points3d': Triangulated 3D map points (3 x N array).
-         - 'matches': The list of matches used.
-         - 'selected_model': Which model was selected ('homography' or 'fundamental').
+            - 'R': Recovered rotation matrix.
+            - 't': Recovered translation vector.
+            - 'points3d': Triangulated 3D map points (3 x N array).
+            - 'matches': The list of matches used.
+            - 'selected_model': Which model was selected ('homography' or 'fundamental').
+            - 'pts_ref': 2D keypoints in the reference image.
+            - 'pts_cur': 2D keypoints in the current image.
         If initialization fails, returns None.
         """
         # -----------------------------
         # Step 1: Extract Features
         # -----------------------------
         kp_ref, des_ref = self.extractor.extract(img_ref)
+
         kp_cur, des_cur = self.extractor.extract(img_cur)
         if des_ref is None or des_cur is None:
             print("Feature extraction failed.")
             return None
+        
+
         
         # -----------------------------
         # Step 2: Match Features
@@ -142,52 +148,88 @@ class MapInitializer:
         # -----------------------------
         # Step 6: Recover Motion and Triangulate
         # -----------------------------
+        # Step 6: Recover Motion and Triangulate
         if selected_model == 'homography':
-            # Decompose homography to get possible motion hypotheses.
             retval, rotations, translations, normals = cv2.decomposeHomographyMat(H, self.K)
+
             best_inliers = 0
             best_pose = None
+            best_reprojection_error = float("inf")
+
             for R, t in zip(rotations, translations):
-                # Create projection matrices for the two views.
                 P1 = self.K @ np.hstack((np.eye(3), np.zeros((3, 1))))
                 P2 = self.K @ np.hstack((R, t.reshape(3, 1)))
+
                 pts4d = cv2.triangulatePoints(P1, P2, pts_ref.T, pts_cur.T)
-                pts3d = pts4d[:3] / pts4d[3]
-                # Check the cheirality condition (points must be in front of both cameras).
+                pts4d /= pts4d[3, :]
+                pts3d = pts4d[:3, :]
+
+                # Cheirality Check
                 pts3d_cam2 = R @ pts3d + t.reshape(3, 1)
-                valid = np.sum((pts3d[2, :] > 0) & (pts3d_cam2[2, :] > 0))
-                if valid > best_inliers:
-                    best_inliers = valid
+                valid = (pts3d[2, :] > 0) & (pts3d_cam2[2, :] > 0)
+                num_valid = np.sum(valid)
+
+                # Compute Reprojection Error
+                projected_pts = (self.K @ P2) @ pts4d
+                projected_pts /= projected_pts[2, :]
+                error = np.linalg.norm(pts_cur.T - projected_pts[:2, :], axis=0).mean()
+
+                # Pick best pose
+                if num_valid > best_inliers and error < best_reprojection_error:
+                    best_inliers = num_valid
                     best_pose = (R, t)
+                    best_reprojection_error = error
+
             if best_pose is None:
                 print("No valid pose found from homography decomposition.")
                 return None
             R, t = best_pose
+
         else:
-            # For the fundamental matrix, convert to the essential matrix.
+            # Fundamental Matrix Case
+            U, S, Vt = np.linalg.svd(F)
+            S[2] = 0  # Enforce rank-2 constraint
+            F = U @ np.diag(S) @ Vt
+
             E = self.K.T @ F @ self.K
             retval, R, t, mask_pose = cv2.recoverPose(E, pts_ref, pts_cur, self.K)
-            if retval < 10:
-                print("Pose recovery from fundamental matrix failed.")
-                return None
-
+            t /= np.linalg.norm(t)  # Normalize translation
         # -----------------------------
-        # Final Triangulation of 3D Points
+        # Final Triangulation and Robust Filtering
         # -----------------------------
         P1 = self.K @ np.hstack((np.eye(3), np.zeros((3, 1))))
         P2 = self.K @ np.hstack((R, t.reshape(3, 1)))
+
         pts4d = cv2.triangulatePoints(P1, P2, pts_ref.T, pts_cur.T)
-        pts3d = pts4d[:3] / pts4d[3]
+        pts4d /= pts4d[3, :]  # Normalize homogeneous coordinates
+        pts3d = pts4d[:3, :]
+
+        # Stronger cheirality check: Only keep points in front of both cameras
+        pts3d_cam2 = R @ pts3d + t.reshape(3, 1)
+        valid1 = pts3d[2, :] > 0  # Points should be in front of the first camera
+        valid2 = pts3d_cam2[2, :] > 0  # Points should be in front of the second camera
+        valid = np.logical_and(valid1, valid2)
+
+        # Remove outliers by filtering extreme depth values
+        depths = pts3d[2, valid]
+        if depths.size > 0:
+            max_depth_threshold = np.percentile(depths, 95)  # Remove outliers beyond 95th percentile
+            valid = valid & (pts3d[2, :] < max_depth_threshold)
+
+        # Apply the valid mask
+        pts3d_filtered = pts3d[:, valid]
+        pts_ref_filtered = pts_ref[valid, :]
+        pts_cur_filtered = pts_cur[valid, :]
 
         return {
             'R': R,
             't': t,
-            'points3d': pts3d,
+            'points3d': pts3d_filtered,
             'matches': matches,
-            'selected_model': selected_model
+            'selected_model': selected_model,
+            'pts_ref': pts_ref_filtered,
+            'pts_cur': pts_cur_filtered
         }
-       
-        
 
     
 
