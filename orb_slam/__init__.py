@@ -8,7 +8,7 @@ from .pose_estimator import PoseEstimator
 from .global_init_map import MapInitializer
 from .optimizer import Optimizer
 from .visualizer import Visualizer
-from .bundle_adjustment import BundleAdjuster
+from .bundle_adjustment import BundleAdjustment
 from .keyframe_manager import KeyframeManager
 from .mapping import SparseMapping, MapPoint, KeyFrame
 
@@ -21,7 +21,7 @@ __all__ = [
     'MapInitializer',
     'Optimizer',
     'Visualizer',
-    'BundleAdjuster',
+    'BundleAdjustment',
     'KeyframeManager',
     'KeyFrame'
     'MapPoint',

@@ -92,6 +92,11 @@ class MapInitializer:
         # Step 1: Extract Features
         # -----------------------------
         kp_ref, des_ref = self.extractor.extract(img_ref)
+        # print(len(kp_ref))
+        # img_keypoints = cv2.drawKeypoints(img_ref, kp_ref, None, color=(0, 255, 0))
+        # cv2.imshow("Keypoint Extraction according to grid based discretization ", img_keypoints)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
 
         kp_cur, des_cur = self.extractor.extract(img_cur)
         if des_ref is None or des_cur is None:
@@ -107,6 +112,11 @@ class MapInitializer:
         if len(matches)<8 :
             print("Not enough matches for initialization.")
             return None
+        
+        # img_matches = cv2.drawMatches(img_ref, kp_ref, img_cur, kp_cur, matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+        # cv2.imshow("Matches", img_matches)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
         
         # Build arrays of matched points. #Filtering the good matches from keypoints.
         pts_ref = np.array([kp_ref[m.queryIdx].pt for m in matches])
@@ -200,23 +210,24 @@ class MapInitializer:
         P1 = self.K @ np.hstack((np.eye(3), np.zeros((3, 1))))
         P2 = self.K @ np.hstack((R, t.reshape(3, 1)))
 
+        # ✅ More numerically stable triangulation
         pts4d = cv2.triangulatePoints(P1, P2, pts_ref.T, pts_cur.T)
-        pts4d /= pts4d[3, :]  # Normalize homogeneous coordinates
+        pts4d /= (pts4d[3, :] + 1e-8)  # Avoid division by zero
         pts3d = pts4d[:3, :]
 
-        # Stronger cheirality check: Only keep points in front of both cameras
+        # ✅ Stronger cheirality check (ensures valid points in front of both cameras)
         pts3d_cam2 = R @ pts3d + t.reshape(3, 1)
         valid1 = pts3d[2, :] > 0  # Points should be in front of the first camera
         valid2 = pts3d_cam2[2, :] > 0  # Points should be in front of the second camera
         valid = np.logical_and(valid1, valid2)
 
-        # Remove outliers by filtering extreme depth values
+        # ✅ Remove outliers using depth filtering
         depths = pts3d[2, valid]
         if depths.size > 0:
-            max_depth_threshold = np.percentile(depths, 95)  # Remove outliers beyond 95th percentile
+            max_depth_threshold = np.percentile(depths, 95)  # Remove extreme outliers
             valid = valid & (pts3d[2, :] < max_depth_threshold)
 
-        # Apply the valid mask
+        # ✅ Apply valid mask
         pts3d_filtered = pts3d[:, valid]
         pts_ref_filtered = pts_ref[valid, :]
         pts_cur_filtered = pts_cur[valid, :]
