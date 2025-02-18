@@ -12,6 +12,7 @@ from .bundle_adjustment import BundleAdjustment
 from .keyframe_manager import KeyframeManager
 from .mapping import SparseMapping, MapPoint, KeyFrame
 
+
 # Defining the public API of the package
 __all__ = [
     'ImageLoader',
@@ -25,5 +26,5 @@ __all__ = [
     'KeyframeManager',
     'KeyFrame'
     'MapPoint',
-    'SparseMapping'
+    'SparseMapping',
 ]
