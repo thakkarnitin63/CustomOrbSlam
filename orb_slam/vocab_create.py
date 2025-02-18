@@ -58,6 +58,9 @@ class Vocabulary:
         print("Vocabulary loaded successfully!")
     
     def get_visual_word(self, descriptor):
+        if descriptor is None or descriptor.size == 0:
+            return np.array([])
+        descriptor = np.atleast_2d(descriptor)  # Ensure descriptor is always 2D
         distances = cdist(descriptor, self.words, metric='euclidean')
         return np.argmin(distances, axis=1)
 
@@ -82,16 +85,18 @@ class Database:
         
         self.bow_vectors[image_id] = word_histogram
     
-    def query(self, query_words):
-        best_match = None
-        best_score = float('-inf')
+    def query(self, query_words, top_k=12):
+        scores = []
+        
+        # Compute similarity scores for all images
         for image_id, bow_vec in self.bow_vectors.items():
             common_words = set(query_words) & set(bow_vec.keys())
             score = sum(min(query_words.count(w) * self.word_weights[w], bow_vec[w]) for w in common_words)
-            if score > best_score:
-                best_match = image_id
-                best_score = score
-        return best_match, best_score
+            scores.append((image_id, score))
+
+        # Sort by highest score and return the top_k matches
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores[:top_k]  # Return top 12 matches
 
 # Load KITTI Dataset and Extract Features
 def load_kitti_images(dataset_path):
@@ -130,5 +135,7 @@ def train_dbow2(kitti_path):
     return vocab, db
 
 # Example usage
-KITTI_PATH = "/home/nitin/NitinWs/CustomOrbSlam/data/dataset/sequences/00/image_0"  # Update with actual path
-vocab, db = train_dbow2(KITTI_PATH)
+if __name__ == "__main__":
+    KITTI_PATH = "/home/nitin/NitinWs/CustomOrbSlam/data/dataset/sequences/00/image_0"  # Update with actual path
+    vocab, db = train_dbow2(KITTI_PATH)  # ✅ This only runs if we run this file directly!
+
