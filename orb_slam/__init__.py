@@ -12,7 +12,7 @@ from .keyframe_manager import KeyframeManager
 from .Tracking_mod import Tracking
 from .map_point import MapPoint
 from .keyframe import Keyframe
-
+from .map import Map
 
 
 # Defining the public API of the package
@@ -27,5 +27,6 @@ __all__ = [
     'KeyframeManager',
     'Tracking',
     'KeyFrame',
-    'MapPoint'  
+    'MapPoint',
+    'Map'  
 ]
