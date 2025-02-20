@@ -11,6 +11,7 @@ from .visualizer import Visualizer
 from .bundle_adjustment import BundleAdjustment
 from .keyframe_manager import KeyframeManager
 from .mapping import SparseMapping, MapPoint, KeyFrame
+from .Tracking_mod import Tracking
 
 
 # Defining the public API of the package
@@ -26,5 +27,6 @@ __all__ = [
     'KeyframeManager',
     'KeyFrame'
     'MapPoint',
-    'SparseMapping',
+    'SparseMapping',,
+    'Tracking'  
 ]
