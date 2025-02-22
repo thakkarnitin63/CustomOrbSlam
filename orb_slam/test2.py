@@ -11,6 +11,9 @@ from orb_slam.feature_extractor import FeatureExtractor
 from orb_slam.feature_matcher import FeatureMatcher
 from orb_slam.global_init_map import MapInitializer
 from orb_slam.bundle_adjustment import BundleAdjustment
+from orb_slam.map import Map
+from orb_slam.map_point import MapPoint
+from orb_slam.keyframe import KeyFrame
 
 def se3_to_transformation(R, t):
     """
@@ -238,39 +241,69 @@ def main():
 
     feature_extractor = FeatureExtractor()
     matcher = FeatureMatcher()
+    global_map = Map()
 
-    map_initializer = MapInitializer(K, feature_extractor, matcher)
+    map_initializer = MapInitializer(K, feature_extractor, matcher, global_map)
 
     # ✅ Perform Initial Map Construction
-    init_results = map_initializer.initialize_map(image1, image2)
-    if init_results is None or init_results['points3d'].size == 0:
-        print("⚠️ No valid 3D points found. Exiting.")
+    success = map_initializer.initialize_map(image1, image2)
+    if not success:
+        print("⚠️ Map initialization failed.")
         return
+    
+        # ✅ Verify Extracted Keypoints & Descriptors
+    keyframe1 = global_map.get_keyframe(0)
+    keyframe2 = global_map.get_keyframe(1)
 
-    print(f"📌 Pre-BA 3D points: {init_results['points3d'].shape}")
+    print(f"🔹 Keypoints in KeyFrame1: {len(keyframe1.keypoints)}")
+    print(f"🔹 Keypoints in KeyFrame2: {len(keyframe2.keypoints)}")
+    
+    print(f"🔹 Descriptors Shape KeyFrame1: {keyframe1.descriptors.shape}")
+    print(f"🔹 Descriptors Shape KeyFrame2: {keyframe2.descriptors.shape}")
+
+    # ✅ Verify Number of 3D Map Points Created
+    print(f"🔹 Total MapPoints: {len(global_map.map_points)}")
+
+    # ✅ Verify One Example MapPoint
+    if len(global_map.map_points) > 0:
+        example_point = next(iter(global_map.map_points.values()))
+        print(f"🔹 Sample MapPoint ID: {example_point.id}")
+        print(f"🔹 Sample MapPoint Position: {example_point.position}")
+        print(f"🔹 Sample MapPoint Descriptor Shape: {example_point.descriptor.shape}")
+
+    before_ba =keyframe2.pose
+    # ✅ Perform Full Bundle Adjustment (BA)
+    ba = BundleAdjustment(K, iterations=15)
+    print("\n🛠 Performing Bundle Adjustment (BA)...")
+
+    # Optimize entire global map with BA
+    ba.optimize_full(global_map)
+
+    # ✅ Extract Optimized Keyframe Poses
+    refined_pose1 = global_map.get_keyframe(1).pose  # Updated KeyFrame 2 pose
+
+    print(f"📌 Pose Before BA:\n{keyframe2.pose}")
+    print(f"📌 Pose After BA:\n{refined_pose1}")
 
     # ✅ Compute RMSE BEFORE BA
-    pre_ba_rmse = compute_rmse([{'id': 1, 'pose': se3_to_transformation(init_results['R'], init_results['t'])}], ground_truth_poses)
+    pre_ba_rmse = compute_rmse(
+        [{'id': 1, 'pose': before_ba}], ground_truth_poses
+    )
     print(f"📏 RMSE Before BA: {pre_ba_rmse:.4f}")
 
-    # ✅ Apply **Full** Bundle Adjustment on Initial 2 Frames
-    ba = BundleAdjustment(K, iterations=15)  # ✅ Use the new BA class
-    pose_ba0, pose_ba1, points3d_ba = ba.optimize(init_results)
-
-    print(f"📌 Post-BA 3D points: {points3d_ba.shape}")
-
-    # ✅ Extract Optimized Rotation & Translation
-    R_ba = pose_ba1.rotation().matrix()  # Extract rotation as (3x3) NumPy array
-    t_ba = pose_ba1.translation().reshape(3, 1)  # Extract translation as (3,1)
-    print("Pose before BA:\n", init_results['R'], init_results['t'])
-    print("Pose after BA:\n", R_ba, t_ba)
-
     # ✅ Compute RMSE AFTER BA
-    post_ba_rmse = compute_rmse([{'id': 1, 'pose': se3_to_transformation(R_ba, t_ba)}], ground_truth_poses)
+    post_ba_rmse = compute_rmse(
+        [{'id': 1, 'pose': refined_pose1}], ground_truth_poses
+    )
     print(f"📏 RMSE After BA: {post_ba_rmse:.4f}")
 
-    # ✅ Visualization (Optional)
-    visualize_initialization(init_results['points3d'], points3d_ba, R_ba, t_ba)
+    # ✅ Optional: Compare Map Points Before & After BA
+    points3d_ba = np.array([mp.position for mp in global_map.map_points.values()]).T
+    print(f"📌 Post-BA 3D points: {points3d_ba.shape}")
+
+
+    # # ✅ Visualization (Optional)
+    # visualize_initialization(init_results['points3d'], points3d_ba, R_ba, t_ba)
 
 if __name__ == "__main__":
     main()

@@ -11,7 +11,7 @@ from .bundle_adjustment import BundleAdjustment
 from .keyframe_manager import KeyframeManager
 from .Tracking_mod import Tracking
 from .map_point import MapPoint
-from .keyframe import Keyframe
+from .keyframe import KeyFrame
 from .map import Map
 
 

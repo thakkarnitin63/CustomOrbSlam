@@ -1,18 +1,23 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from orb_slam.map import Map
+from orb_slam.map_point import MapPoint
+from orb_slam.keyframe import KeyFrame
 
 class MapInitializer:
-    def __init__(self, K, feature_extractor, feature_matcher):
+    def __init__(self, K, feature_extractor, feature_matcher, map_instance):
         """
         params:
             -K: Camera calibration matrix.
             - feature_extractor : An instance that provides an .extract(image) method.
             - matcher: An instance that provides a .match(des1, des2) method.
+            - map_instance: Global Map instance.
         """
         self.K = K
         self.extractor = feature_extractor
         self.matcher = feature_matcher
+        self.map = map_instance  # Global Map instance
 
         # Set outlier thresholds (based on X^2 test at 95% for 1 pixel std)
         self.T_H = 5.99 # Homography Mat. threshold
@@ -72,38 +77,25 @@ class MapInitializer:
         Computes the score contribution from a set of squared errors.
         For each error d^2, if d^2< T, add (gamma -d^2); otherwise add 0.
         """
-        return np.sum(np.where(errors<T, Gamma-errors,0))
+        return np.sum(np.where(errors < T, Gamma - errors,0))
 
     def initialize_map(self, img_ref, img_cur):
         """
         Attempts to initialize the map from a reference image and a current image.
         
-        Returns a dictionary containing:
-            - 'R': Recovered rotation matrix.
-            - 't': Recovered translation vector.
-            - 'points3d': Triangulated 3D map points (3 x N array).
-            - 'matches': The list of matches used.
-            - 'selected_model': Which model was selected ('homography' or 'fundamental').
-            - 'pts_ref': 2D keypoints in the reference image.
-            - 'pts_cur': 2D keypoints in the current image.
+        Returns:
+            - True if initialization was successful
+            - False if it failed
         If initialization fails, returns None.
         """
         # -----------------------------
         # Step 1: Extract Features
         # -----------------------------
         kp_ref, des_ref = self.extractor.extract(img_ref)
-        # print(len(kp_ref))
-        # img_keypoints = cv2.drawKeypoints(img_ref, kp_ref, None, color=(0, 255, 0))
-        # cv2.imshow("Keypoint Extraction according to grid based discretization ", img_keypoints)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-
         kp_cur, des_cur = self.extractor.extract(img_cur)
         if des_ref is None or des_cur is None:
             print("Feature extraction failed.")
-            return None
-        
-
+            return False
         
         # -----------------------------
         # Step 2: Match Features
@@ -111,16 +103,18 @@ class MapInitializer:
         matches = self.matcher.match(des_ref, des_cur, kp_ref, kp_cur)
         if len(matches)<8 :
             print("Not enough matches for initialization.")
-            return None
+            return False
         
-        # img_matches = cv2.drawMatches(img_ref, kp_ref, img_cur, kp_cur, matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-        # cv2.imshow("Matches", img_matches)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
         
         # Build arrays of matched points. #Filtering the good matches from keypoints.
         pts_ref = np.array([kp_ref[m.queryIdx].pt for m in matches])
         pts_cur = np.array([kp_cur[m.trainIdx].pt for m in matches])
+
+        kp_ref_filter = np.array([kp_ref[m.queryIdx] for m in matches])
+        kp_cur_filter = np.array([kp_cur[m.trainIdx] for m in matches])
+    
+        des_ref_filter = np.array([des_ref[m.queryIdx] for m in matches])
+        des_cur_filter = np.array([des_cur[m.trainIdx] for m in matches])
 
         # -----------------------------
         # Step 3: Compute Geometrical Models (RANSAC)
@@ -129,7 +123,7 @@ class MapInitializer:
         F, mask_F = cv2.findFundamentalMat(pts_ref, pts_cur, cv2.FM_RANSAC, 3.0, 0.99)
         if H is None or F is None:
             print("Model estimation failed.")
-            return None   
+            return False   
 
 
         # -----------------------------
@@ -192,7 +186,7 @@ class MapInitializer:
 
             if best_pose is None:
                 print("No valid pose found from homography decomposition.")
-                return None
+                return False
             R, t = best_pose
 
         else:
@@ -229,19 +223,29 @@ class MapInitializer:
 
         # ✅ Apply valid mask
         pts3d_filtered = pts3d[:, valid]
-        pts_ref_filtered = pts_ref[valid, :]
-        pts_cur_filtered = pts_cur[valid, :]
+        kps_ref_filtered = [kp_ref_filter[i] for i in range(len(kp_ref_filter)) if valid[i]]        
+        des_ref_filtered = np.array([des_ref_filter[i] for i in range(len(des_ref_filter)) if valid[i]])
 
-        return {
-            'R': R,
-            't': t,
-            'points3d': pts3d_filtered,
-            'matches': matches,
-            'selected_model': selected_model,
-            'pts_ref': pts_ref_filtered,
-            'pts_cur': pts_cur_filtered
-        }
+        kps_cur_filtered = [kp_cur_filter[i] for i in range(len(kp_cur_filter)) if valid[i]]
+        des_cur_filtered = np.array([des_cur_filter[i] for i in range(len(des_cur_filter)) if valid[i]])
 
+        keyframe1 = KeyFrame(0, np.eye(4), self.K, kps_ref_filtered, des_ref_filtered)
+        keyframe2_pose = np.eye(4)
+        keyframe2_pose[:3, :3] = R
+        keyframe2_pose[:3, 3] = t.flatten()
+        keyframe2 = KeyFrame(1, keyframe2_pose, self.K, kps_cur_filtered, des_cur_filtered)
+
+        self.map.add_keyframe(keyframe1)
+        self.map.add_keyframe(keyframe2)
+
+        for i, points3d in enumerate(pts3d_filtered.T):
+            mappoint = MapPoint(i, points3d, des_ref_filtered[i])
+            self.map.add_map_point(mappoint)
+            keyframe1.add_map_point(i, mappoint)
+            keyframe2.add_map_point(i, mappoint)
+
+        print(f"Map initialized successfully with 2 keyframes and {len(self.map.map_points)} map points.")
+        return True
     
 
 

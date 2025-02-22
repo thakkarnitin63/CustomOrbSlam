@@ -4,23 +4,25 @@ import g2o
 from orb_slam.feature_extractor import FeatureExtractor
 from orb_slam.feature_matcher import FeatureMatcher
 from orb_slam.bundle_adjustment import BundleAdjustment
-from orb_slam.map import Map, MapPoint
+from orb_slam.map import Map
+from orb_slam.map_point import MapPoint
 from orb_slam.keyframe import KeyFrame
 from orb_slam.bow_database import BoWDatabase
 
 class Tracking:
-    def __init__(self, camera_intrinsics, map_instance):
+    def __init__(self, camera_intrinsics, map_instance, bow_database):
         """
         ORB-SLAM Tracking Module
         :param camera_intrinsics: Intrinsic matrix K (3x3 numpy array)
         :param map_instance: Instance of the Map class that contains keyframes and map points.
+        :param bow_database: Instance of BoWDatabase for relocalization and loop closure.
         """
         self.K = camera_intrinsics  # Camera intrinsic matrix
         self.map = map_instance  # Global Map
+        self.bow_database = bow_database  # Bag of Words Database for relocalization and loop detection
         self.feature_extractor = FeatureExtractor()
         self.feature_matcher = FeatureMatcher()
         self.bundle_adjustment = BundleAdjustment(self.K)
-        self.bow_database = BoWDatabase()  # Used for relocalization
         
         self.last_frame = None  # Store the last successfully tracked frame
         self.current_frame = None  # Store the current frame
@@ -69,7 +71,13 @@ class Tracking:
         """
         Perform relocalization if tracking is lost.
         """
-        # To be implemented in the next step
+        # Convert descriptors into visual words
+        visual_words = self.bow_database.get_visual_word(descriptors)
+        
+        # Query the database for the best matching keyframes
+        top_matches = self.bow_database.query(visual_words, top_k=5)
+        
+        # To be implemented: Use top matches for pose estimation
         pass
     
     def track_local_map(self):
