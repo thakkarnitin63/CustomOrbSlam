@@ -1,15 +1,14 @@
 import numpy as np
 
 class MapPoint:
-    def __init__(self, id, position, descriptor):
+    def __init__(self, position, descriptor):
         """
         Represents a 3D map point in the world coordinate system.
         
-        :param id: Unique identifier for the map point.
         :param position: 3D position (numpy array of shape (3,)).
         :param descriptor: Representative ORB descriptor (numpy array of shape (32,)).
         """
-        self.id = id  # Unique ID for the map point
+        self.id = None  # 🔹 ID will be assigned when added to Map
         self.position = np.array(position, dtype=np.float32)  # 3D world position
         self.descriptor = descriptor  # ORB Descriptor
         

@@ -1,3 +1,4 @@
+import numpy as np
 class Map:
     def __init__(self):
         """
@@ -5,6 +6,7 @@ class Map:
         """
         self.keyframes = {}  # Dictionary of keyframe_id -> KeyFrame
         self.map_points = {}  # Dictionary of map_point_id -> MapPoint
+        self.next_map_point_id = 0  # 🔹 Always increasing, never reused
     
     def add_keyframe(self, keyframe):
         """
@@ -15,12 +17,17 @@ class Map:
         self.keyframes[keyframe.id] = keyframe
     
     def add_map_point(self, map_point):
-        """
-        Adds a new map point to the map.
+        """ Adds a new MapPoint **only if it doesn’t already exist**. 
         
         :param map_point: MapPoint object to be added.
-        """
-        self.map_points[map_point.id] = map_point
+        :return: The assigned MapPoint ID if successful, or None if the point already exists."""
+        
+        
+        # Assign a new unique ID if point is unique
+        map_point.id = self.next_map_point_id
+        self.map_points[self.next_map_point_id] = map_point
+        self.next_map_point_id += 1
+        return map_point.id  # ✅ Return the assigned ID
     
     def get_keyframe(self, keyframe_id):
         """
@@ -50,13 +57,18 @@ class Map:
             del self.keyframes[keyframe_id]
     
     def remove_map_point(self, map_point_id):
-        """
-        Removes a map point from the map.
+        """ Removes a map point but does NOT reuse its ID. 
         
         :param map_point_id: ID of the map point to be removed.
         """
         if map_point_id in self.map_points:
-            del self.map_points[map_point_id]
+            map_point = self.map_points[map_point_id]
+            
+            # Remove references from all keyframes that observed it
+            for keyframe in list(map_point.keyframes_observed):
+                keyframe.remove_map_point(map_point_id)
+
+            del self.map_points[map_point_id]  # 🔹 Simply remove, no reuse of ID
     
     def get_best_covisibility_keyframes(self, keyframe, min_shared_points=15):
         """

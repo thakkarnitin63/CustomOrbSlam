@@ -19,19 +19,21 @@ class BundleAdjustment(g2o.SparseOptimizer):
         solver = g2o.BlockSolverSE3(g2o.LinearSolverDenseSE3())
         solver = g2o.OptimizationAlgorithmLevenberg(solver)
         super().set_algorithm(solver)
-
+        
+    def add_camera_parameters(self):
+        """Adds the camera intrinsic parameters to the optimizer."""
+        fx, fy = self.K[0, 0], self.K[1, 1]
+        cx, cy = self.K[0, 2], self.K[1, 2]
+        cam_params = g2o.CameraParameters(fx, (cx, cy), 0)
+        cam_params.set_id(0)
+        self.add_parameter(cam_params)
+        return cam_params
     def optimize_full(self, map_instance):
         """
         Full Bundle Adjustment: Optimizes all keyframes and map points.
         """
         self.clear()
-
-        # --- Add Camera Parameters ---
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        cam_params = g2o.CameraParameters(fx, (cx, cy), 0)
-        cam_params.set_id(0)
-        super().add_parameter(cam_params)
+        cam_params = self.add_camera_parameters()
 
         # --- Add Keyframes (Poses) ---
         for keyframe in map_instance.keyframes.values():
@@ -43,13 +45,18 @@ class BundleAdjustment(g2o.SparseOptimizer):
 
         # --- Add Observations (Edges) ---
         for keyframe in map_instance.keyframes.values():
-            for keypoint_idx, map_point in keyframe.map_points.items():
-                self.add_edge(map_point.id, keyframe.id, keyframe.keypoints[keypoint_idx].pt)
+            for keypoint_idx, map_point_id in keyframe.map_points.items():  # 🔹 Use ID
+                map_point = map_instance.get_map_point(map_point_id)  # 🔹 Fetch the object
+                if map_point:
+                    self.add_edge(map_point.id, keyframe.id, keyframe.keypoints[keypoint_idx].pt)
 
-        # --- Optimize ---
+
+
+
         super().initialize_optimization()
         print("\n🔹 Performing **Full Bundle Adjustment**")
         super().optimize(self.iterations)
+
 
         # --- Update the Map ---
         for keyframe in map_instance.keyframes.values():
@@ -63,13 +70,8 @@ class BundleAdjustment(g2o.SparseOptimizer):
         Local Bundle Adjustment: Optimizes the last few keyframes and their map points.
         """
         self.clear()
+        cam_params = self.add_camera_parameters()
 
-        # --- Add Camera Parameters ---
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        cam_params = g2o.CameraParameters(fx, (cx, cy), 0)
-        cam_params.set_id(0)
-        super().add_parameter(cam_params)
 
         # --- Add Recent Keyframes ---
         for keyframe in recent_keyframes:
@@ -79,21 +81,28 @@ class BundleAdjustment(g2o.SparseOptimizer):
         for keyframe in recent_keyframes:
             for neighbor_id in keyframe.get_best_covisibility_keyframes(min_shared_points=20):
                 neighbor = map_instance.get_keyframe(neighbor_id)
-                self.add_pose(neighbor.id, neighbor.pose, cam_params, fixed=True)
+                if neighbor:
+                    self.add_pose(neighbor.id, neighbor.pose, cam_params, fixed=True)
 
         # --- Add Relevant 3D Map Points ---
         map_points_to_optimize = set()
         for keyframe in recent_keyframes:
-            for keypoint_idx, map_point in keyframe.map_points.items():
-                map_points_to_optimize.add(map_point)
+            for keypoint_idx, map_point_id in keyframe.map_points.items():
+                map_points_to_optimize.add(map_point_id)
 
-        for map_point in map_points_to_optimize:
-            self.add_point(map_point.id, map_point.position, fixed=False)
+        for map_point_id in map_points_to_optimize:
+            map_point = map_instance.get_map_point(map_point_id)
+            if map_point:
+                self.add_point(map_point_id, map_point.position, fixed=False)
+
 
         # --- Add Observations (Edges) ---
-        for keyframe in recent_keyframes:
-            for keypoint_idx, map_point in keyframe.map_points.items():
-                self.add_edge(map_point.id, keyframe.id, keyframe.keypoints[keypoint_idx].pt)
+        for keyframe in recent_keyframes:  # 🔹 Loop over all keyframes
+            for keypoint_idx, map_point_id in keyframe.map_points.items():
+                map_point = map_instance.get_map_point(map_point_id)
+                if map_point:
+                    self.add_edge(map_point_id, keyframe.id, keyframe.keypoints[keypoint_idx].pt)
+
 
         # --- Optimize ---
         super().initialize_optimization()
@@ -104,32 +113,35 @@ class BundleAdjustment(g2o.SparseOptimizer):
         for keyframe in recent_keyframes:
             keyframe.pose = self.get_pose(keyframe.id)
 
-        for map_point in map_points_to_optimize:
-            map_point.position = self.get_point(map_point.id)
+        for map_point_id in map_points_to_optimize:
+            map_point = map_instance.get_map_point(map_point_id)
+            if map_point:
+                map_point.position = self.get_point(map_point_id)
 
-    def optimize_pose(self, keyframe):
+    def optimize_pose(self, keyframe, map_instance):
         """
         Motion-only Bundle Adjustment: Optimizes the pose of a single keyframe.
         """
         self.clear()
+        cam_params = self.add_camera_parameters()
 
-        # --- Add Camera Parameters ---
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        cam_params = g2o.CameraParameters(fx, (cx, cy), 0)
-        cam_params.set_id(0)
-        super().add_parameter(cam_params)
 
         # --- Add the Pose (Single Keyframe) ---
         self.add_pose(keyframe.id, keyframe.pose, cam_params, fixed=False)
 
         # --- Add 3D Map Points (Fixed) ---
-        for keypoint_idx, map_point in keyframe.map_points.items():
-            self.add_point(map_point.id, map_point.position, fixed=True)
+        for keypoint_idx, map_point_id in keyframe.map_points.items():
+            map_point = map_instance.get_map_point(map_point_id)
+            if map_point:
+                self.add_point(map_point_id, map_point.position, fixed=True)
+
 
         # --- Add Observations (Edges) ---
-        for keypoint_idx, map_point in keyframe.map_points.items():
-            self.add_edge(map_point.id, keyframe.id, keyframe.keypoints[keypoint_idx].pt)
+        for keypoint_idx, map_point_id in keyframe.map_points.items():
+            map_point = map_instance.get_map_point(map_point_id)
+            if map_point:
+                self.add_edge(map_point_id, keyframe.id, keyframe.keypoints[keypoint_idx].pt)
+
 
         # --- Optimize ---
         super().initialize_optimization()
@@ -155,7 +167,7 @@ class BundleAdjustment(g2o.SparseOptimizer):
 
         # Add camera vertex to optimizer
         v_se3 = g2o.VertexCam()
-        v_se3.set_id(pose_id * 2)  
+        v_se3.set_id(pose_id*2)  
         v_se3.set_estimate(sbacam)
         v_se3.set_fixed(fixed)
         super().add_vertex(v_se3)
@@ -165,7 +177,7 @@ class BundleAdjustment(g2o.SparseOptimizer):
     def add_point(self, point_id, point, fixed=False, marginalized=True):
         """ Adds a 3D point to the optimizer. """
         v_p = g2o.VertexPointXYZ()
-        v_p.set_id(point_id * 2 + 1)
+        v_p.set_id(point_id* 2 + 1)
         v_p.set_estimate(point)
         v_p.set_marginalized(marginalized)
         v_p.set_fixed(fixed)
@@ -173,20 +185,18 @@ class BundleAdjustment(g2o.SparseOptimizer):
 
     def add_edge(self, point_id, pose_id, measurement):
         """ Adds an edge (observation constraint) between keyframe and 3D point. """
+
         edge = g2o.EdgeProjectP2MC()
-        edge.set_vertex(0, self.vertex(point_id * 2 + 1))
+        edge.set_vertex(0, self.vertex(point_id* 2 +1))
         edge.set_vertex(1, self.vertex(pose_id * 2))
         edge.set_measurement(measurement)
         edge.set_information(10 * np.identity(2))
-
-        # Apply Robust Kernel
-        edge.set_robust_kernel(g2o.RobustKernelHuber(np.sqrt(5.991)))  
+        edge.set_robust_kernel(g2o.RobustKernelHuber(np.sqrt(5.991)))
         super().add_edge(edge)
 
     def get_pose(self, pose_id):
         """ Retrieves the optimized pose of a keyframe. """
-        estimate = self.vertex(pose_id * 2).estimate()
-
+        estimate = self.vertex(pose_id * 2).estimate()  # 🔹 Use correct KeyFrame ID
         # ✅ Convert Quaternion to Rotation Matrix
         R = estimate.rotation().matrix()  # Convert to 3x3 rotation matrix
         t = estimate.translation().reshape(3, 1)  # Ensure it's a (3,1) vector
@@ -201,4 +211,5 @@ class BundleAdjustment(g2o.SparseOptimizer):
 
     def get_point(self, point_id):
         """ Retrieves the optimized 3D point. """
-        return self.vertex(point_id * 2 + 1).estimate()
+        return self.vertex(point_id * 2 +1).estimate()  # 🔹 Use consistent MapPoint ID
+

@@ -17,7 +17,7 @@ class KeyFrame:
         self.keypoints = keypoints  # ORB KeyPoints
         self.descriptors = descriptors  # ORB Descriptors
         
-        self.map_points = {}  # Dictionary mapping keypoint indices to MapPoints
+        self.map_points = {}  # Dictionary mapping keypoint indices to MapPoint **IDs**
         self.covisibility_graph = {}  # Stores connections to other keyframes
     
     def get_camera_center(self):
@@ -28,25 +28,28 @@ class KeyFrame:
         t = self.pose[:3, 3]  # Extract translation
         return -np.dot(R.T, t)  # Compute camera center C
     
-    def add_map_point(self, keypoint_idx, map_point):
+    def add_map_point(self, keypoint_idx, map_point_id):
         """
-        Associates a keypoint with a 3D MapPoint.
+        Associates a keypoint with a 3D MapPoint's id.
         
         :param keypoint_idx: Index of the keypoint in the keyframe.
-        :param map_point: The corresponding MapPoint.
+        :param map_point: The corresponding MapPoint global id.
         """
-        self.map_points[keypoint_idx] = map_point
+        if map_point_id is None:
+            print(f"❌ ERROR: KeyFrame {self.id} tried to store a None map point ID")
+        self.map_points[keypoint_idx] = map_point_id # 🔹 Store MapPoint **ID**, not the object
     
-    def get_descriptor(self, map_point):
+    def get_descriptor(self, map_point_id, global_map):
         """
-        Returns the descriptor of the keypoint associated with a given MapPoint.
-        
-        :param map_point: The MapPoint whose descriptor is needed.
+        Returns the descriptor of the keypoint associated with a given MapPoint ID.
+
+        :param map_point_id: The ID of the MapPoint whose descriptor is needed.
+        :param global_map: The global map instance to fetch the MapPoint.
         :return: ORB descriptor (numpy array) or None if not found.
         """
-        for keypoint_idx, mp in self.map_points.items():
-            if mp == map_point:
-                return self.descriptors[keypoint_idx]
+        map_point = global_map.get_map_point(map_point_id)
+        if map_point:
+            return map_point.descriptor  # 🔹 Always return the latest descriptor
         return None
     
     def add_covisibility_link(self, other_keyframe, shared_points):

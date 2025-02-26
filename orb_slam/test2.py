@@ -271,6 +271,15 @@ def main():
         print(f"🔹 Sample MapPoint Position: {example_point.position}")
         print(f"🔹 Sample MapPoint Descriptor Shape: {example_point.descriptor.shape}")
 
+
+    for mp in global_map.map_points.values():
+        if not isinstance(mp.position, np.ndarray):
+            print(f"❌ ERROR: MapPoint {mp.id} has an invalid position type: {type(mp.position)}")
+        elif mp.position.shape != (3,):
+            print(f"❌ ERROR: MapPoint {mp.id} has an invalid shape: {mp.position.shape}")
+        elif np.isnan(mp.position).any() or np.isinf(mp.position).any():
+            print(f"❌ ERROR: MapPoint {mp.id} contains NaN/Inf values: {mp.position}")
+
     before_ba =keyframe2.pose
     # ✅ Perform Full Bundle Adjustment (BA)
     ba = BundleAdjustment(K, iterations=15)
@@ -302,8 +311,8 @@ def main():
     print(f"📌 Post-BA 3D points: {points3d_ba.shape}")
 
 
-    # # ✅ Visualization (Optional)
-    # visualize_initialization(init_results['points3d'], points3d_ba, R_ba, t_ba)
+    # # # ✅ Visualization (Optional)
+    # # visualize_initialization(init_results['points3d'], points3d_ba, R_ba, t_ba)
 
 if __name__ == "__main__":
     main()

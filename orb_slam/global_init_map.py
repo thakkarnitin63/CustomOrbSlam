@@ -222,12 +222,16 @@ class MapInitializer:
             valid = valid & (pts3d[2, :] < max_depth_threshold)
 
         # ✅ Apply valid mask
+
         pts3d_filtered = pts3d[:, valid]
         kps_ref_filtered = [kp_ref_filter[i] for i in range(len(kp_ref_filter)) if valid[i]]        
         des_ref_filtered = np.array([des_ref_filter[i] for i in range(len(des_ref_filter)) if valid[i]])
 
         kps_cur_filtered = [kp_cur_filter[i] for i in range(len(kp_cur_filter)) if valid[i]]
         des_cur_filtered = np.array([des_cur_filter[i] for i in range(len(des_cur_filter)) if valid[i]])
+
+
+
 
         keyframe1 = KeyFrame(0, np.eye(4), self.K, kps_ref_filtered, des_ref_filtered)
         keyframe2_pose = np.eye(4)
@@ -238,11 +242,16 @@ class MapInitializer:
         self.map.add_keyframe(keyframe1)
         self.map.add_keyframe(keyframe2)
 
-        for i, points3d in enumerate(pts3d_filtered.T):
-            mappoint = MapPoint(i, points3d, des_ref_filtered[i])
-            self.map.add_map_point(mappoint)
-            keyframe1.add_map_point(i, mappoint)
-            keyframe2.add_map_point(i, mappoint)
+        for keypoint_idx, points3d in enumerate(pts3d_filtered.T):
+
+            mappoint = MapPoint(points3d, des_ref_filtered[keypoint_idx])
+            map_point_id = self.map.add_map_point(mappoint)
+
+            if map_point_id is None:
+                print(f"❌ ERROR: Failed to add MapPoint {keypoint_idx}")  # Debugging line
+
+            keyframe1.add_map_point(keypoint_idx, map_point_id)
+            keyframe2.add_map_point(keypoint_idx, map_point_id)
 
         print(f"Map initialized successfully with 2 keyframes and {len(self.map.map_points)} map points.")
         return True
