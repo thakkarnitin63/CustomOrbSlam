@@ -244,7 +244,7 @@ class MapInitializer:
 
         for keypoint_idx, points3d in enumerate(pts3d_filtered.T):
 
-            mappoint = MapPoint(points3d, des_ref_filtered[keypoint_idx])
+            mappoint = MapPoint(points3d, des_cur_filtered[keypoint_idx])
             map_point_id = self.map.add_map_point(mappoint)
 
             if map_point_id is None:

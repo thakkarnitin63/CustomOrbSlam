@@ -1,7 +1,7 @@
 import numpy as np
 import g2o
 import copy
-
+# Relation for pose id and point id are fix some how in g2o so dont change here.
 class BundleAdjustment(g2o.SparseOptimizer):
     def __init__(self, K, iterations=10):
         """
