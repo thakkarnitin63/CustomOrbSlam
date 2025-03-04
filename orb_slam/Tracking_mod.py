@@ -116,40 +116,28 @@ class Tracking:
             # Optionally, you might choose to keep the previous last_frame if tracking is lost.
 
         
-    def track_with_motion_model(self, keypoints, descriptors):
+    def _projection_match_search(self, keypoints, descriptors, windowSize, TH_HIGH, MIN_MATCHES):
         """
-        Robust tracking using a constant velocity motion model, batch projection,
-        spatial indexing (KD‑tree), and BFMatcher with a ratio test.
+        Helper function that performs batch projection of map points from the last keyframe,
+        builds a KD-tree for current frame keypoints, and searches for correspondences.
         
-        Steps:
-        1. Predict the current pose using the last frame’s pose (with precomputed velocity).
-        2. Batch-project all MapPoints from the last keyframe into the current image using cv2.projectPoints.
-        3. Build a KD‑tree on current frame keypoint locations.
-        4. For each projected MapPoint:
-            a. Query the KD‑tree for candidate keypoints within a narrow window (~15 pixels).
-            b. Use BFMatcher (with k=2 and a ratio test) to match the stored MapPoint descriptor against candidate descriptors.
-        5. If a sufficient number of matches is found, refine the current pose using motion‑only bundle adjustment.
-        
-        Returns:
-        True if tracking is successful (enough matches found and pose refined), False otherwise.
+        :param keypoints: List of keypoints from the current frame.
+        :param descriptors: Corresponding descriptors from the current frame.
+        :param windowSize: Search window size (in pixels).
+        :param TH_HIGH: Maximum acceptable Hamming distance.
+        :param MIN_MATCHES: Minimum number of matches required.
+        :return: A dictionary mapping keypoint indices (from last keyframe) to current frame keypoint indices,
+                or None if not enough matches are found.
         """
-        # --- 1. Pose Prediction using last frame's pose and precomputed velocity ---
-        if self.last_frame is None or not hasattr(self.last_frame, 'pose'):
-            return False
-        # Use precomputed velocity (self.mVelocity) applied to the last frame's pose.
-        predicted_pose = np.dot(self.mVelocity, self.last_frame.pose)
-        self.current_pose = predicted_pose
-
-        # Convert the rotation matrix from the current pose to a rotation vector (required for cv2.projectPoints).
+        # Convert current pose to rotation vector for projection.
         R = self.current_pose[:3, :3]
         t = self.current_pose[:3, 3]
         rvec, _ = cv2.Rodrigues(R)
-
-        # --- 2. Batch Project All MapPoints from Last Keyframe ---
-        # Retrieve map point indices from the last keyframe's stored associations.
+        
+        # Get map point indices from the last keyframe's stored associations.
         mp_keys = list(self.motion_model["last_keyframe"].map_points.keys())
-        if len(mp_keys) == 0:
-            return False
+        if not mp_keys:
+            return None
 
         mp_positions = []
         mp_descs = []
@@ -162,50 +150,39 @@ class Tracking:
             mp_positions.append(mp.position)
             mp_descs.append(mp.descriptor)
             mp_map_idx.append(idx)
-        if len(mp_positions) == 0:
-            return False
+        if not mp_positions:
+            return None
 
-        mp_positions = np.array(mp_positions, dtype=np.float32)  # Shape: (N, 3)
-        mp_descs = np.array(mp_descs)  # Shape: (N, descriptor_length)
+        mp_positions = np.array(mp_positions, dtype=np.float32)
+        mp_descs = np.array(mp_descs)
 
-        # Project all 3D map point positions into the image.
+        # Batch-project all 3D map point positions into the image.
         imagePoints, _ = cv2.projectPoints(mp_positions, rvec, t, self.K, None)
-        projected_pts = imagePoints.reshape(-1, 2)  # (N, 2)
+        projected_pts = imagePoints.reshape(-1, 2)
 
-        # --- 3. Build a KD-Tree for Current Frame Keypoints ---
+        # Build a KD-tree for current frame keypoints.
         current_kp_positions = np.array([kp.pt for kp in keypoints], dtype=np.float32)
         from scipy.spatial import cKDTree
         kd_tree = cKDTree(current_kp_positions)
 
-        # --- 4. For Each Projected MapPoint, Find Candidate Matches within a narrow window ---
-        windowSize = 15  # Narrow window (in pixels) for guided search.
-        mfNNratio = 0.9  # Ratio test threshold.
-        TH_HIGH = 100    # Maximum acceptable Hamming distance.
-        projected_matches = {}  # Mapping: last keyframe's keypoint index -> current frame keypoint index.
+        # Perform matching for each projected map point.
+        projected_matches = {}
         bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-        h_img, w_img = self.current_frame.shape  # Assumes a grayscale image.
+        h_img, w_img = self.current_frame.shape  # Assumes grayscale image.
+        mfNNratio = 0.9
 
         for i, proj in enumerate(projected_pts):
             x, y = proj
-            # Discard projected points outside the image.
             if x < 0 or x >= w_img or y < 0 or y >= h_img:
                 continue
-
-            # Query the KD-Tree for candidate keypoints within the narrow window.
             candidate_indices = kd_tree.query_ball_point(proj, windowSize)
-            if len(candidate_indices) == 0:
+            if not candidate_indices:
                 continue
-
-            # Gather candidate descriptors.
-            candidate_descs = [descriptors[idx] for idx in candidate_indices]
-            candidate_descs = np.array(candidate_descs)
-
-            # Use BFMatcher with knnMatch (k=2) to compare the stored MapPoint descriptor with candidates.
+            candidate_descs = np.array([descriptors[idx] for idx in candidate_indices])
             map_desc = np.array([mp_descs[i]])
             matches = bf.knnMatch(map_desc, candidate_descs, k=2)
-            if matches is None or len(matches) == 0:
+            if not matches or len(matches[0]) == 0:
                 continue
-
             best_matches = matches[0]
             if len(best_matches) < 2:
                 if best_matches[0].distance < TH_HIGH:
@@ -216,29 +193,76 @@ class Tracking:
                     current_idx = candidate_indices[best_matches[0].trainIdx]
                     projected_matches[mp_map_idx[i]] = current_idx
 
-        # --- 5. Validate and Refine Pose ---
-        MIN_MATCHES = 20
         if len(projected_matches) < MIN_MATCHES:
-            print(f"TrackWithMotionModel: Not enough matches ({len(projected_matches)})")
+            print(f"Projection match search: Not enough matches ({len(projected_matches)})")
+            return None
+        return projected_matches
+
+    def track_with_motion_model(self, keypoints, descriptors):
+        """
+        Attempts to track using a narrow, guided search based on the motion model.
+        
+        Uses the last frame's pose (updated with precomputed velocity) as the initial guess,
+        then calls _projection_match_search with a narrow window (15 pixels, TH_HIGH=100, MIN_MATCHES=20).
+        
+        Returns True if tracking is successful, False otherwise.
+        """
+        # --- 1. Pose Prediction using last frame's pose and precomputed velocity ---
+        if self.last_frame is None or not hasattr(self.last_frame, 'pose'):
+            return False
+        predicted_pose = np.dot(self.mVelocity, self.last_frame.pose)
+        self.current_pose = predicted_pose
+
+        # Narrow search parameters:
+        windowSize = 15
+        TH_HIGH = 100
+        MIN_MATCHES = 20
+
+        matches = self._projection_match_search(keypoints, descriptors, windowSize, TH_HIGH, MIN_MATCHES)
+        if matches is None:
             return False
 
-        # Create a temporary keyframe to encapsulate the matched correspondences.
+        # --- 5. Refine Pose ---
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
-        temp_keyframe.map_points = projected_matches
-
-        # Refine the current pose using motion-only bundle adjustment.
+        temp_keyframe.map_points = matches
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
         self.current_pose = temp_keyframe.pose
-        self.tracked_map_points = projected_matches
+        self.tracked_map_points = matches
 
         return True
-    
+
     def track_with_map_points(self, keypoints, descriptors):
         """
-        Use map points to estimate the camera pose if motion model fails.
+        Fallback method: If the motion model narrow search fails,
+        perform a wider search using looser constraints.
+        
+        Uses the last keyframe's pose as the reference, then calls
+        _projection_match_search with a wider window (200 pixels, TH_HIGH=100, MIN_MATCHES=10).
+        
+        Returns True if tracking is successful, False otherwise.
         """
-        # To be implemented in the next step
-        pass
+        if self.motion_model["last_keyframe"] is None:
+            return False
+        reference_pose = self.motion_model["last_keyframe"].pose.copy()
+        self.current_pose = reference_pose
+
+        # Wider search parameters:
+        windowSize = 200
+        TH_HIGH = 100
+        MIN_MATCHES = 10
+
+        matches = self._projection_match_search(keypoints, descriptors, windowSize, TH_HIGH, MIN_MATCHES)
+        if matches is None:
+            return False
+
+        temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
+        temp_keyframe.map_points = matches
+        self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
+        self.current_pose = temp_keyframe.pose
+        self.tracked_map_points = matches
+
+        return True
+
     
     def global_relocalization(self, keypoints, descriptors):
         """
