@@ -266,16 +266,99 @@ class Tracking:
     
     def global_relocalization(self, keypoints, descriptors):
         """
-        Perform relocalization if tracking is lost.
+        Perform global relocalization when tracking is lost.
+        
+        Steps:
+        1. Convert the current frame's descriptors into visual words.
+        2. Query the BoW database for candidate keyframes.
+        3. For each candidate keyframe:
+                a. Use the feature matcher to match candidate keyframe descriptors with current frame descriptors.
+                b. For each match, if the candidate keyframe has an associated MapPoint,
+                    add the corresponding 3D position (from the map) and 2D point (from the current frame) to lists.
+                c. Use cv2.solvePnPRansac to estimate the camera pose from these correspondences.
+        4. If a candidate yields a pose with enough inliers, refine the pose using motion-only bundle adjustment,
+            update self.current_pose, and return True.
+        5. Otherwise, return False.
+        
+        Returns:
+        True if a valid pose is recovered and refined, False otherwise.
         """
-        # Convert descriptors into visual words
+        # 1. Convert current frame descriptors to visual words.
         visual_words = self.bow_database.get_visual_word(descriptors)
         
-        # Query the database for the best matching keyframes
-        top_matches = self.bow_database.query(visual_words, top_k=5)
-        
-        # To be implemented: Use top matches for pose estimation
-        pass
+        # 2. Query the BoW database for candidate keyframes.
+        top_candidates = self.bow_database.query(visual_words, top_k=5)
+        if not top_candidates:
+            print("Global Relocalization: No candidate keyframes found.")
+            return False
+
+        best_pose = None
+        best_inliers_count = 0
+        # 3. Process each candidate keyframe.
+        for candidate_id, score in top_candidates:
+            candidate_kf = self.map.get_keyframe(candidate_id)
+            if candidate_kf is None:
+                continue
+            
+            # 3a. Match candidate keyframe descriptors to current frame descriptors.
+            # (We assume self.feature_matcher.match returns a list of match objects.)
+            matches = self.feature_matcher.match(candidate_kf.descriptors, descriptors, candidate_kf.keypoints, keypoints)
+            if matches is None or len(matches) < 15:
+                continue
+            
+            pts_3d = []
+            pts_2d = []
+            # 3b. Build correspondences.
+            for m in matches:
+                cand_idx = m.queryIdx  # Index in candidate keyframe.
+                curr_idx = m.trainIdx   # Index in current frame.
+                # Check if candidate keyframe has an associated map point for this keypoint.
+                if cand_idx not in candidate_kf.map_points:
+                    continue
+                map_point_id = candidate_kf.map_points[cand_idx]
+                mp = self.map.get_map_point(map_point_id)
+                if mp is None:
+                    continue
+                pts_3d.append(mp.position)
+                pts_2d.append(keypoints[curr_idx].pt)
+            if len(pts_3d) < 6:
+                continue
+
+            pts_3d = np.array(pts_3d, dtype=np.float32)
+            pts_2d = np.array(pts_2d, dtype=np.float32)
+            
+            # 3c. Estimate pose using PnP with RANSAC.
+            retval, rvec, tvec, inliers = cv2.solvePnPRansac(
+                pts_3d, pts_2d, self.K, None,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+                reprojectionError=8.0, confidence=0.99, iterationsCount=100)
+            
+            if not retval or inliers is None or len(inliers) < 10:
+                continue
+            
+            # Convert estimated pose into 4x4 matrix.
+            R_est, _ = cv2.Rodrigues(rvec)
+            pose_est = np.eye(4, dtype=np.float32)
+            pose_est[:3, :3] = R_est
+            pose_est[:3, 3] = tvec.flatten()
+            
+            if len(inliers) > best_inliers_count:
+                best_inliers_count = len(inliers)
+                best_pose = pose_est
+
+        if best_pose is None:
+            print("Global Relocalization: Failed to recover pose.")
+            return False
+
+        # 4. Refine the pose using motion-only bundle adjustment.
+        self.current_pose = best_pose
+        temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
+        # (Optionally, you could re-associate map points using a guided search here.)
+        self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
+        self.current_pose = temp_keyframe.pose
+
+        print(f"Global Relocalization: Successful with {best_inliers_count} inliers.")
+        return True
     
     def track_local_map(self):
         """
