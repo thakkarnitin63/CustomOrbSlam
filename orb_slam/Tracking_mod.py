@@ -161,7 +161,7 @@ class Tracking:
         projected_pts = imagePoints.reshape(-1, 2)
 
         # Build a KD-tree for current frame keypoints.
-        current_kp_positions = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+        current_kp_positions = np.array([kp.pt for kp in keypoints], dtype=np.float32) # New image pts 
         from scipy.spatial import cKDTree
         kd_tree = cKDTree(current_kp_positions)
 
@@ -175,10 +175,10 @@ class Tracking:
             x, y = proj
             if x < 0 or x >= w_img or y < 0 or y >= h_img:
                 continue
-            candidate_indices = kd_tree.query_ball_point(proj, windowSize)
+            candidate_indices = kd_tree.query_ball_point(proj, windowSize) # query on new image tree
             if not candidate_indices:
                 continue
-            candidate_descs = np.array([descriptors[idx] for idx in candidate_indices])
+            candidate_descs = np.array([descriptors[idx] for idx in candidate_indices]) # getting new image's descrip
             map_desc = np.array([mp_descs[i]])
             matches = bf.knnMatch(map_desc, candidate_descs, k=2)
             if not matches or len(matches[0]) == 0:
@@ -186,12 +186,15 @@ class Tracking:
             best_matches = matches[0]
             if len(best_matches) < 2:
                 if best_matches[0].distance < TH_HIGH:
-                    current_idx = candidate_indices[best_matches[0].trainIdx]
-                    projected_matches[mp_map_idx[i]] = current_idx
+                    current_idx = candidate_indices[best_matches[0].trainIdx] # just a idea to check for queryIdx
+                    map_point_id = self.motion_model["last_keyframe"].map_points[mp_map_idx[i]]
+                    projected_matches[current_idx] =  map_point_id
             else:
                 if best_matches[0].distance < mfNNratio * best_matches[1].distance and best_matches[0].distance < TH_HIGH:
                     current_idx = candidate_indices[best_matches[0].trainIdx]
-                    projected_matches[mp_map_idx[i]] = current_idx
+                    map_point_id = self.motion_model["last_keyframe"].map_points[mp_map_idx[i]]
+                    projected_matches[current_idx] = map_point_id
+
 
         if len(projected_matches) < MIN_MATCHES:
             print(f"Projection match search: Not enough matches ({len(projected_matches)})")
@@ -294,6 +297,9 @@ class Tracking:
 
         best_pose = None
         best_inliers_count = 0
+        best_candidate_id = None
+        best_matches = None
+
         # 3. Process each candidate keyframe.
         for candidate_id, score in top_candidates:
             candidate_kf = self.map.get_keyframe(candidate_id)
@@ -308,19 +314,24 @@ class Tracking:
             
             pts_3d = []
             pts_2d = []
+            valid_matches = [] # Track with matches have valid map points
+
             # 3b. Build correspondences.
             for m in matches:
                 cand_idx = m.queryIdx  # Index in candidate keyframe.
                 curr_idx = m.trainIdx   # Index in current frame.
+
                 # Check if candidate keyframe has an associated map point for this keypoint.
                 if cand_idx not in candidate_kf.map_points:
                     continue
+        
                 map_point_id = candidate_kf.map_points[cand_idx]
                 mp = self.map.get_map_point(map_point_id)
                 if mp is None:
-                    continue
+                        continue
                 pts_3d.append(mp.position)
                 pts_2d.append(keypoints[curr_idx].pt)
+                valid_matches.append(m) # track the valid matches
             if len(pts_3d) < 6:
                 continue
 
@@ -345,6 +356,8 @@ class Tracking:
             if len(inliers) > best_inliers_count:
                 best_inliers_count = len(inliers)
                 best_pose = pose_est
+                best_candidate_id = candidate_id
+                best_matches = valid_matches
 
         if best_pose is None:
             print("Global Relocalization: Failed to recover pose.")
@@ -352,6 +365,18 @@ class Tracking:
 
         # 4. Refine the pose using motion-only bundle adjustment.
         self.current_pose = best_pose
+
+        # Update tracked map points from the best candidate
+        best_candidate_kf = self.map.get_keyframe(best_candidate_id)
+        for m in best_matches:
+            cand_idx = m.queryIdx
+            curr_idx = m.trainIdx
+
+            if cand_idx in best_candidate_kf.map_points:
+                map_point_id = best_candidate_kf.map_points[cand_idx]
+                if self.map.get_map_point(map_point_id) is not None:
+                    self.tracked_map_points[curr_idx] = map_point_id
+                    
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
         # (Optionally, you could re-associate map points using a guided search here.)
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
