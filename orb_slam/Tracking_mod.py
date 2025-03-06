@@ -385,12 +385,65 @@ class Tracking:
         print(f"Global Relocalization: Successful with {best_inliers_count} inliers.")
         return True
     
-    def track_local_map(self):
+    def track_local_map(self, keypoints, descriptors):
         """
-        Track map points in the local map and refine pose.
+        Track map points in the local map and refine camera pose.
+    
+        Steps:
+        1. Find local map (keyframes K1 that share points with current frame and their neighbors K2)
+        2. Project all map points visible in these keyframes into the current frame
+        3. Apply filtering criteria (viewing angle, scale, etc.)
+        4. Match remaining projections with still-unmatched ORB features
+        5. Optimize the camera pose with all found correspondences
+        
+        Returns: True if tracking is successful with sufficient matches, False otherwise
         """
-        # To be implemented in the next step
-        pass
+        if self.current_pose is None or not self.tracked_map_points:
+            print("Cannot track local map: no initial pose or tracked points")
+            return False
+        
+        if keypoints is None or descriptors is None:
+            print("No features available in current frame")
+            return False
+        
+        # Create set to track already matched keypoints in current frame
+        matched_indices = set(self.tracked_map_points.keys()) # 2d point indices of current frame with map points
+        
+        # --- 1. Indentify the local map ---
+
+        # Find K1: keyframes sharing map points with current frame
+        K1 = set()
+        point_observations = {} # Keyframe ID -> count of shared map points
+
+        # For each map point seen in current frame, find all keyframes that observe it
+        for keypoint_idx, map_point_id in self.tracked_map_points.items():
+            map_point = self.map.get_map_point(map_point_id)
+            if map_point is None:
+                continue
+
+            # Add all keyframes that observe this map points 
+            if hasattr(map_point, 'keyframes_observed'):
+                for kf_id in map_point.keyframes_observed:
+                    K1.add(kf_id)
+
+                    # Count observations for finding reference keyframe
+                    if kf_id not in point_observations:
+                        point_observations[kf_id] = 0
+                    point_observations[kf_id] += 1
+
+        # Find reference keyframe (Kref): keyframe in K1 with most shared map points
+        reference_keyframe_id = None
+        max_observations = 0
+        for kf_id, count in point_observations.items():
+            if count>max_observations:
+                max_observations = count
+                reference_keyframe_id = kf_id
+
+        if reference_keyframe_id is None:
+            print("No reference keyframe found for local map.")
+            return False
+
+
     
     def check_new_keyframe(self, frame_id, keypoints, descriptors):
         """
