@@ -38,6 +38,8 @@ class Tracking:
             "last_keyframe": self.map.get_keyframe(1),      # Assumes keyframe 1 exists.
             "second_last_keyframe": self.map.get_keyframe(0)  # Assumes keyframe 0 exists.
         }
+        self.current_keypoints = None
+        self.current_descriptors = None
         
         # Current frame state:
         self.current_frame = None
@@ -83,6 +85,8 @@ class Tracking:
         # Extract features from the current frame.
         keypoints, descriptors = self.feature_extractor.extract(frame)
         
+        self.current_keypoints = keypoints
+        self.current_descriptors = descriptors
         # Attempt to track using the cascade of methods.
         success = self.track_with_motion_model(keypoints, descriptors)
         if not success:
@@ -385,7 +389,7 @@ class Tracking:
         print(f"Global Relocalization: Successful with {best_inliers_count} inliers.")
         return True
     
-    def track_local_map(self, keypoints, descriptors):
+    def track_local_map(self, keypoints = None, descriptors = None):
         """
         Track map points in the local map and refine camera pose.
     
@@ -401,6 +405,13 @@ class Tracking:
         if self.current_pose is None or not self.tracked_map_points:
             print("Cannot track local map: no initial pose or tracked points")
             return False
+        
+        # Use the keypoints and descriptors from the current frame
+        if keypoints is None:
+            keypoints = self.current_keypoints
+        if descriptors is None:
+            descriptors = self.current_descriptors
+        
         
         if keypoints is None or descriptors is None:
             print("No features available in current frame")
@@ -442,6 +453,134 @@ class Tracking:
         if reference_keyframe_id is None:
             print("No reference keyframe found for local map.")
             return False
+
+        # Get K2: neighbors to K1 in covisibility graph
+        K2 = set()
+        for kf_id in K1:
+            kf = self.map.get_keyframe(kf_id)
+            if kf is None:
+                continue
+
+            # Add neighbors with strong covisibility connections
+            K2.update(kf.get_best_covisibility_keyframes(min_shared_points=15))
+
+        # Combine K1 and K2 to form the local map keyframes
+        local_map_keyframe_ids = K1.union(K2)
+
+        # --- 2. Find visible map points in the local map ---
+
+        # Collect all map points observed by the local map keyframes
+        local_map_points = set()
+        for kf_id in local_map_keyframe_ids:
+            kf = self.map.get_keyframe(kf_id)
+            if kf is None:
+                continue
+
+            # Add all map points observed by this keyframe
+            for keypoint_idx, map_point_id in kf.map_points.items():
+                if map_point_id not in self.tracked_map_points.values():  # Only add points not already tracked
+                    local_map_points.add(map_point_id)
+
+        # --- 3. Project and filter local map points ---
+
+        # Get current camera information for projection
+        K = self.K                      # Camera intrinsic matrix
+        R = self.current_pose[:3, :3]   # Rotation matrix
+        t = self.current_pose[:3, 3]    # Translation vector
+        camera_center = -R.T @ t        # Camera center in world coordinates
+        rvec, _ = cv2.Rodrigues(R)      # Convert rotation matrix to rotation vector
+
+        # Get image dimensions
+        h, w = self.current_frame.shape
+
+        new_matches ={} # will store new keypoints_idx -> map_points_id matches
+
+        # Process each map point in the local map
+        for map_point_id in local_map_points:
+            map_point = self.map.get_map_point(map_point_id)
+            if map_point is None:
+                continue
+
+            # 1. Project the map point into current frame
+            pt3d = map_point.position.reshape(1,3)
+            image_pts, _ = cv2.projectPoints(pt3d, rvec, t, K, None)
+            x, y = image_pts[0, 0]
+
+            # Discard if projection is outside image bounds
+            if x < 0 or x >= w or y < 0 or y >= h:
+                continue
+
+            # 2. Check viewing angle
+            viewing_ray = map_point.position - camera_center # Vector from camera to that 3d point
+            viewing_ray = viewing_ray/ np.linalg.norm(viewing_ray) # Normalize
+
+            # Get mean viewing direction (if available)
+
+            mean_viewing_dir = None 
+            if hasattr(map_point, 'compute_mean_viewing_direction'):
+                mean_viewing_dir =map_point.compute_mean_viewing_direction()
+            elif hasattr(map_point, 'viewing_directions') and map_point.viewing_directions:
+                # Compute mean direction directly if function not available
+                dirs = np.array(map_point.viewing_directions)
+                mean_viewing_dir = np.mean(dirs, axis=0)
+                mean_viewing_dir = mean_viewing_dir / np.linalg.norm(mean_viewing_dir)
+
+            if mean_viewing_dir is None:
+                continue
+
+            # Discard if viewing angle is too large (>60 degrees)
+            cos_angle = np.dot(viewing_ray, mean_viewing_dir)
+            if cos_angle < np.cos(np.radians(60)):
+                continue
+
+            # 3. Check scale invariance
+            dist = np.linalg.norm(map_point.position - camera_center)
+
+            # Discard if point is too close or too far based on scale invariance
+            d_min  = getattr(map_point, 'd_min' , None)
+            d_max = getattr(map_point, 'd_max' , None)
+            if d_min is not None and d_max is not None:
+                if dist < d_min or dist > d_max:
+                    continue
+            # 4. Compute the scale in the frame
+            scale = 1.0
+            if d_min is not None:
+                scale = dist/d_min
+
+            # 5. Find the best match among unmatched keypoints
+            best_match_idx = None
+            best_match_dist = float('inf')
+            max_search_radius = 15 # Search radius in pixels
+
+            # Search for keypoints near the projected position at the right scale
+            for i, kp in enumerate(keypoints):
+                # Skip already matched keypoints
+                if i in matched_indices:
+                    continue
+
+                # Check if keypoint is close to the projected position
+                dx = kp.pt[0] - x
+                dy = kp.pt[1] - y
+                if dx**2 + dy**2 > max_search_radius**2:
+                    continue
+
+                # Check if scale are compatible 
+                if abs(np.log2(scale / (1 << kp.octave))) >1.0: # More than 1 octave difference
+                    continue
+
+                # Compare descriptors
+                desc_dist = cv2.norm(descriptors[i], map_point.descriptor, cv2.NORM_HAMMING)
+                if desc_dist < best_match_dist:
+                    best_match_dist = desc_dist
+                    best_match_idx = i
+
+            if best_match_idx is not None and best_match_idx < 50:  # Threshold for descriptor distance
+                new_matches[best_match_idx] = map_point_id
+                matched_indices.add(best_match_idx)
+
+ 
+
+
 
 
     
