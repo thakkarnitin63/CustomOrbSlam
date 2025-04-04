@@ -231,10 +231,10 @@ class Tracking:
 
         # --- 5. Refine Pose ---
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
-        temp_keyframe.map_points = matches.values() ## made changes here 
+        temp_keyframe.map_points = matches 
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
         self.current_pose = temp_keyframe.pose
-        self.tracked_map_points = matches.values() ##  made changes here
+        self.tracked_map_points = matches
 
         return True
 
