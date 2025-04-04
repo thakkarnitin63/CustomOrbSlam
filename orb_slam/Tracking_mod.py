@@ -145,7 +145,7 @@ class Tracking:
 
         mp_positions = []
         mp_descs = []
-        mp_map_idx = []  # These indices correspond to keypoints in the last keyframe.
+        mp_map_idx = []  # These indices correspond to map points in map for this keyframe
         for idx in mp_keys:
             map_point_id = self.motion_model["last_keyframe"].map_points[idx]
             mp = self.map.get_map_point(map_point_id)
@@ -231,10 +231,10 @@ class Tracking:
 
         # --- 5. Refine Pose ---
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
-        temp_keyframe.map_points = matches
+        temp_keyframe.map_points = matches.values() ## made changes here 
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
         self.current_pose = temp_keyframe.pose
-        self.tracked_map_points = matches
+        self.tracked_map_points = matches.values() ##  made changes here
 
         return True
 
