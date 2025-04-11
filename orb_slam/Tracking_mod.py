@@ -389,196 +389,118 @@ class Tracking:
         print(f"Global Relocalization: Successful with {best_inliers_count} inliers.")
         return True
     
-    def track_local_map(self, keypoints = None, descriptors = None):
+    def track_local_map(self):
         """
-        Track map points in the local map and refine camera pose.
+        Track map points in the local map to refine camera pose.
     
-        Steps:
-        1. Find local map (keyframes K1 that share points with current frame and their neighbors K2)
-        2. Project all map points visible in these keyframes into the current frame
-        3. Apply filtering criteria (viewing angle, scale, etc.)
-        4. Match remaining projections with still-unmatched ORB features
-        5. Optimize the camera pose with all found correspondences
-        
-        Returns: True if tracking is successful with sufficient matches, False otherwise
+        1. Identifies the local map(keyframes sharing points with current frame and their neighbors)
+        2. Projects all map points from these keyframes into the current frame
+        3. Matches projected points with unmatched features using filtering criteria
+        4. Refines the camera pose with all matches using motion-only bundle adjustment
+
+        Returns:
+            bool: True if tracking is successful, False otherwise
         """
+        # Skip if we don't have initial pose or tracked points
         if self.current_pose is None or not self.tracked_map_points:
             print("Cannot track local map: no initial pose or tracked points")
             return False
         
-        # Use the keypoints and descriptors from the current frame
-        if keypoints is None:
-            keypoints = self.current_keypoints
-        if descriptors is None:
-            descriptors = self.current_descriptors
         
-        
+        keypoints = self.current_keypoints
+        descriptors = self.current_descriptors
+
         if keypoints is None or descriptors is None:
             print("No features available in current frame")
             return False
         
-        # Create set to track already matched keypoints in current frame
-        matched_indices = set(self.tracked_map_points.keys()) # 2d point indices of current frame with map points
-        
-        # --- 1. Indentify the local map ---
+        # Keep track of already matched keypoints
+        matched_indices = set(self.tracked_map_points.keys())
 
-        # Find K1: keyframes sharing map points with current frame
+        # ===== 1. Identify Local Map ======
+
+        # Find K1: keyframe sharing map points with current frame
         K1 = set()
-        point_observations = {} # Keyframe ID -> count of shared map points
+        point_observations = {} # Keyframe ID -> count of shared points
 
-        # For each map point seen in current frame, find all keyframes that observe it
-        for keypoint_idx, map_point_id in self.tracked_map_points.items():
-            map_point = self.map.get_map_point(map_point_id)
+        # for each map points in current frame, find keyframes that observe it 
+        for point_id in self.tracked_map_points.values(): # getting 3d point id which we saw from previous frame to new frame
+            map_point = self.map.get_map_points(point_id)
             if map_point is None:
                 continue
 
-            # Add all keyframes that observe this map points 
-            if hasattr(map_point, 'keyframes_observed'):
-                for kf_id in map_point.keyframes_observed:
-                    K1.add(kf_id)
+            for kf in self.map.keyframe.values(): # checking all keyframe instance in global map
+                # Check if this keyframe observes the map point
+                for kp_idx, mp_id in kf.map_points.items():
+                    if mp_id == point_id:
+                        K1.add(kf.id)
 
-                    # Count observations for finding reference keyframe
-                    if kf_id not in point_observations:
-                        point_observations[kf_id] = 0
-                    point_observations[kf_id] += 1
-
-        # Find reference keyframe (Kref): keyframe in K1 with most shared map points
-        reference_keyframe_id = None
-        max_observations = 0
-        for kf_id, count in point_observations.items():
-            if count>max_observations:
-                max_observations = count
-                reference_keyframe_id = kf_id
-
-        if reference_keyframe_id is None:
-            print("No reference keyframe found for local map.")
+                        # Count for reference keyframe selection
+                        if kf.id not in point_observations:
+                            point_observations[kf.id]=0
+                        point_observations[kf.id] += 1
+                        break
+        if not K1:
+            print("No keyframe share points with current frame")
             return False
+        
+        # Find reference keyframe (most shared points)
+        K_ref_id = max(point_observations.items(), key=lambda x: x[1])[0]
+        K_ref = self.map.get_keyframe(K_ref_id)
 
-        # Get K2: neighbors to K1 in covisibility graph
+        # Find K2: Neighbor keyframe in covisibility graph
         K2 = set()
         for kf_id in K1:
             kf = self.map.get_keyframe(kf_id)
             if kf is None:
                 continue
 
-            # Add neighbors with strong covisibility connections
-            K2.update(kf.get_best_covisibility_keyframes(min_shared_points=15))
+            # Add neighbors with strong connections (threshold: 15 shared points)
+            neighbors = kf.get_best_covisibility_keyframes(min_shared_points=15)
+            K2.update(neighbors)
 
-        # Combine K1 and K2 to form the local map keyframes
-        local_map_keyframe_ids = K1.union(K2)
 
-        # --- 2. Find visible map points in the local map ---
+        # Combine to get all local keyframes
+        local_keyframe_ids = K1.union(K2)
 
-        # Collect all map points observed by the local map keyframes
-        local_map_points = set()
-        for kf_id in local_map_keyframe_ids:
+        #====== 2. Project Map points ==========
+
+        # Get all map points in local keyframes
+        local_map_points = {} # Mappoint ID -> MapPoint
+
+        for kf_id in local_keyframe_ids:
             kf = self.map.get_keyframe(kf_id)
             if kf is None:
                 continue
 
-            # Add all map points observed by this keyframe
-            for keypoint_idx, map_point_id in kf.map_points.items():
-                if map_point_id not in self.tracked_map_points.values():  # Only add points not already tracked
-                    local_map_points.add(map_point_id)
-
-        # --- 3. Project and filter local map points ---
-
-        # Get current camera information for projection
-        K = self.K                      # Camera intrinsic matrix
-        R = self.current_pose[:3, :3]   # Rotation matrix
-        t = self.current_pose[:3, 3]    # Translation vector
-        camera_center = -R.T @ t        # Camera center in world coordinates
-        rvec, _ = cv2.Rodrigues(R)      # Convert rotation matrix to rotation vector
-
-        # Get image dimensions
-        h, w = self.current_frame.shape
-
-        new_matches ={} # will store new keypoints_idx -> map_points_id matches
-
-        # Process each map point in the local map
-        for map_point_id in local_map_points:
-            map_point = self.map.get_map_point(map_point_id)
-            if map_point is None:
-                continue
-
-            # 1. Project the map point into current frame
-            pt3d = map_point.position.reshape(1,3)
-            image_pts, _ = cv2.projectPoints(pt3d, rvec, t, K, None)
-            x, y = image_pts[0, 0]
-
-            # Discard if projection is outside image bounds
-            if x < 0 or x >= w or y < 0 or y >= h:
-                continue
-
-            # 2. Check viewing angle
-            viewing_ray = map_point.position - camera_center # Vector from camera to that 3d point
-            viewing_ray = viewing_ray/ np.linalg.norm(viewing_ray) # Normalize
-
-            # Get mean viewing direction (if available)
-
-            mean_viewing_dir = None 
-            if hasattr(map_point, 'compute_mean_viewing_direction'):
-                mean_viewing_dir =map_point.compute_mean_viewing_direction()
-            elif hasattr(map_point, 'viewing_directions') and map_point.viewing_directions:
-                # Compute mean direction directly if function not available
-                dirs = np.array(map_point.viewing_directions)
-                mean_viewing_dir = np.mean(dirs, axis=0)
-                mean_viewing_dir = mean_viewing_dir / np.linalg.norm(mean_viewing_dir)
-
-            if mean_viewing_dir is None:
-                continue
-
-            # Discard if viewing angle is too large (>60 degrees)
-            cos_angle = np.dot(viewing_ray, mean_viewing_dir)
-            if cos_angle < np.cos(np.radians(60)):
-                continue
-
-            # 3. Check scale invariance
-            dist = np.linalg.norm(map_point.position - camera_center)
-
-            # Discard if point is too close or too far based on scale invariance
-            d_min  = getattr(map_point, 'd_min' , None)
-            d_max = getattr(map_point, 'd_max' , None)
-            if d_min is not None and d_max is not None:
-                if dist < d_min or dist > d_max:
-                    continue
-            # 4. Compute the scale in the frame
-            scale = 1.0
-            if d_min is not None:
-                scale = dist/d_min
-
-            # 5. Find the best match among unmatched keypoints
-            best_match_idx = None
-            best_match_dist = float('inf')
-            max_search_radius = 15 # Search radius in pixels
-
-            # Search for keypoints near the projected position at the right scale
-            for i, kp in enumerate(keypoints):
-                # Skip already matched keypoints
-                if i in matched_indices:
+            for _, point_id in kf.map_points.items():
+                # Skip points already tracked in current frame
+                if point_id in self.tracked_map_points.values():
                     continue
 
-                # Check if keypoint is close to the projected position
-                dx = kp.pt[0] - x
-                dy = kp.pt[1] - y
-                if dx**2 + dy**2 > max_search_radius**2:
-                    continue
+                map_point = self.map.get_map_point(point_id)
+                if map_point is not None:
+                    local_map_points[point_id] = map_point
 
-                # Check if scale are compatible 
-                if abs(np.log2(scale / (1 << kp.octave))) >1.0: # More than 1 octave difference
-                    continue
+        # Setup for projection
+        img_h, img_w = self.current_frame.shape
+        R = self.current_pose[:3, :3]
+        t = self.current_pose[:3, 3]
+        rvec, _ = cv2.Rodrigues(R)
+        camera_center = -np.dot(R.T, t) # Camera center in world coordinates
 
-                # Compare descriptors
-                desc_dist = cv2.norm(descriptors[i], map_point.descriptor, cv2.NORM_HAMMING)
-                if desc_dist < best_match_dist:
-                    best_match_dist = desc_dist
-                    best_match_idx = i
+        # Project and match points
+        new_matches = {} # Keypoints idx -> MapPoint ID
 
-            if best_match_idx is not None and best_match_idx < 50:  # Threshold for descriptor distance
-                new_matches[best_match_idx] = map_point_id
-                matched_indices.add(best_match_idx)
+        
 
- 
+
+
+
+
+
+
+
 
 
 
