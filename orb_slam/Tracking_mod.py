@@ -488,10 +488,108 @@ class Tracking:
         t = self.current_pose[:3, 3]
         rvec, _ = cv2.Rodrigues(R)
         camera_center = -np.dot(R.T, t) # Camera center in world coordinates
-
+        # X_camera = R·X_world + t
+        # For the camera center, we have X_camera = [0,0,0] by definition. So:
+        # 0 = R·X_center + t
+        # R·X_center = -t
+        # X_center = -R^T·t
+        
         # Project and match points
         new_matches = {} # Keypoints idx -> MapPoint ID
 
+        for point_id, map_point in local_map_points.items():
+            # 1. Project point to image
+            position = map_point.position.reshape(1,3) # getting 3d point position
+            img_points, _ = cv2.projectPoints(position,rvec,t, self.K, None)
+            x,y =img_points[0,0]
+
+            # Skip if outside image bounds
+            if x < 0 or x>= img_w or y < 0 or y >= img_h:
+                continue
+
+            # 2. Check viewing angle
+            view_ray = map_point.position - camera_center
+            view_ray = view_ray / np.linalg.norm(view_ray)
+
+            # Get mean viewing direction of map point
+            mean_dir = map_point.compute_mean_viewing_direction() if hasattr(map_point, 'compute_mean_viewing_direction') else None
+            if mean_dir is None and hasattr(map_point, 'viewing_directions') and map_point.viewing_directions:
+                dirs = np.array(map_point.viewing_directions)
+                mean_dir = np.mean(dirs, axis=0)
+                mean_dir = mean_dir / np.linalg.norm(mean_dir)
+
+            if mean_dir is None:
+                continue
+
+            #Skip if viewing angle too large (>60 degree)
+            cos_angle = np.dot(view_ray, mean_dir)
+            if cos_angle < np.cos(np.radians(60)):
+                continue  
+
+            # 3. Check distance (scale invariance)
+            dist = np.linalg.norm(map_point.position - camera_center)
+
+            if hasattr(map_point, 'd_min') and hasattr(map_point, 'd_max'):
+                if map_point.d_min is not None and map_point.d_max is not None:
+                    if dist < map_point.d_min or dist > map_point.d_max:
+                        continue 
+
+            # 4. Find best match among unmatched keypoints
+            best_idx = None
+            best_dist = float('inf')
+            search_radius = 15 # Pixels
+
+            for i, kp in enumerate(keypoints):
+                # Skip already matched keypoints
+                if i in matched_indices:
+                    continue
+
+                # Check distance to projection
+                dx = kp.pt[0] - x
+                dy = kp.pt[1] - y
+                if dx**2 + dy**2 > search_radius**2:
+                    continue
+
+                #Check scale compatibility
+                scale_factor = dist/map_point.d_min if hasattr(map_point, 'd_min') and map_point.d_min else 1.0
+                if abs(np.log2(scale_factor / (1 << kp.octave))) > 1.0: # More than 1 octave difference
+                    continue
+
+                # Compare descriptors
+                dist = cv2.norm(descriptors[i], map_point.descriptor, cv2.NORM_HAMMING)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+
+            # Add match if good enough
+            if best_idx is not None and best_idx < 50: # Threshold for descriptor distance
+                new_matches[best_idx] = point_id
+                matched_indices.add(best_idx)     
+    
+
+        # ====== 3. Optimize pose with all matches =======
+        
+        # Combine initial and new matches
+        all_matches = {** self.track_with_map_points, **new_matches}
+
+        if len(all_matches) < 20: # Not enough matches for reliable pose estimation
+            print(f"Not enough matches for local map tracking: {len(all_matches)}")
+            return False
+        
+        # create temporary keyframe with all matches
+        temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
+        temp_keyframe.map_points = all_matches
+
+        # Optimize pose
+        self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
+
+        # Update current pose and tracked points
+        self.current_pose = temp_keyframe.pose
+        self.tracked_map_points = all_matches
+
+        print(f"Local map tracking: {len(self.track_with_map_points)} points tracked")
+        return True
+    
         
 
 
