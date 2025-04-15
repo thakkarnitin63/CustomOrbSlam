@@ -493,7 +493,7 @@ class Tracking:
         # 0 = R·X_center + t
         # R·X_center = -t
         # X_center = -R^T·t
-        
+
         # Project and match points
         new_matches = {} # Keypoints idx -> MapPoint ID
 
@@ -593,20 +593,118 @@ class Tracking:
         
 
 
-
-
-
-
-
-
-
-
-
-
     
     def check_new_keyframe(self, frame_id, keypoints, descriptors):
         """
         Decide if the current frame should be inserted as a new keyframe.
+
+        According to the ORB-SLAM paper, a new keyframe is inserted when all these conditions are met:
+        1. More than 20 frames have passed from last global relocalization
+        2. Local mapping is idle, or more than 20 frames have passed from last keyframe insertion
+        3. Current frame tracks at least 50 map points
+        4. Current frame tracks less than 90% of points compared to reference keyframe
+        
+        Returns:
+            bool: True if a new keyframe was inserted, False otherwise
         """
-        # To be implemented in the next step
-        pass
+        # Condition 1: check if enough frames since last relocalization
+        if self.mMinFrames < 20:
+            # Not enough frames since relocalization
+            self.mMinFrames +=1
+            return False
+        
+        # Condition 2: Check if mapping is idle or enough frames since last keyframe
+        # Note: In a complete implementation, we would need a way to check if mapping is idle
+        # As a simplification, we will just use frame counter
+        if self.mMaxFrames < 20:
+            # Not enough frames since last keyframe insertion
+            self.mMaxFrames += 1
+            return False
+        
+        if len(self.tracked_map_points) <50:
+            # Not enough points tracked
+            return False
+        
+        # Condition 4: Check visual changes (compare with reference keyframe)
+        reference_keyframe = self._get_reference_keyframe()
+        if reference_keyframe is None:
+            # No valid reference, use conservative approach and insert keyframe
+            print("No reference keyframe found, inserting new keyframe")
+        else:
+            # Count points in reference keyframe
+            ref_point_count = len(reference_keyframe.map_points)
+            if ref_point_count ==0:
+                # No points in reference, use conservative approach
+                print("Reference keyframe has no points, inserting new keyframe")
+            else:
+                # Calculate ratio of tracked points
+                current_tracked_ratio = len(self.tracked_map_points) / ref_point_count
+                if current_tracked_ratio >= 0.9:
+                    # Current frame tracks more than 90% of reference points,
+                    # not enough visual change to warrant a new keyframe
+                    return False
+                
+        #All conditions met, insert a new keyframe
+        print(f"Inserting new keyframe  {frame_id} with {len(self.tracked_map_points)} tracked points")
+
+        # Create a new keyframe
+        new_keyframe = KeyFrame(frame_id, self.current_pose, self.K, keypoints, descriptors)
+
+
+        # Associate current tracked map points with the new keyframe
+        for keypoint_idx, map_point_id in self.tracked_map_points.items():
+            new_keyframe.add_map_point(keypoint_idx,map_point_id)
+
+        # Add to the map
+        self.map.add_keyframe(new_keyframe)
+
+        # Update motion model
+        self.motion_model["second_last_keyframe"] =self.motion_model["last_keyframe"]
+        self.motion_model["last_keyframe"] = new_keyframe
+
+        # Reset Frame counters
+        self.mMaxFrames = 0 # Reset counter for frames since last keyframe
+
+        # Signal to the local mapping thread (in a full implementation)
+        # Here we would notify the local mapping thread that a new keyframe is available
+
+        return True
+    
+    def _get_reference_keyframe(self):
+        """
+        Find the reference keyframe that shares most map points with current frame.
+        
+        Returns:
+            KeyFrame: The reference keyframe, or None if not found
+        """
+        # Count observations per keyframe
+        observations = {}
+        
+        # For each mapped point in current frame
+        for map_point_id in self.tracked_map_points.values():
+            # Find all keyframes observing this point
+            for keyframe in self.map.keyframes.values():
+                # Check if this keyframe observes the map point
+                if any(mp_id == map_point_id for mp_id in keyframe.map_points.values()):
+                    if keyframe.id not in observations:
+                        observations[keyframe.id] = 0
+                    observations[keyframe.id] += 1
+        
+        # Find keyframe with maximum shared points
+        if not observations:
+            return None
+        
+        max_observations = 0
+        ref_id = None
+        
+        for kf_id, count in observations.items():
+            if count > max_observations:
+                max_observations = count
+                ref_id = kf_id
+        
+        return self.map.get_keyframe(ref_id)
+
+
+
+
+        
