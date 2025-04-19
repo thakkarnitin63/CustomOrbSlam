@@ -1,0 +1,14 @@
+Metadata-Version: 2.1
+Name: orbslam
+Version: 0.1.0
+Summary: A custom implementation of ORB-SLAM, a monocular SLAM system
+Home-page: UNKNOWN
+Author: Nitin Thakkar
+Author-email: thakkarnitin1998@gmail.com
+License: UNKNOWN
+Platform: UNKNOWN
+Requires-Python: >=3.6
+License-File: LICENSE
+
+UNKNOWN
+
