@@ -431,7 +431,7 @@ class Tracking:
                     self.tracked_map_points[curr_idx] = map_point_id
                     
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
-        temp_keyframe.add_map_point = self.tracked_map_points
+        temp_keyframe.map_points = self.tracked_map_points
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
         self.current_pose = temp_keyframe.pose
 
@@ -474,11 +474,11 @@ class Tracking:
 
         # for each map points in current frame, find keyframes that observe it 
         for point_id in self.tracked_map_points.values(): # getting 3d point id which we saw from previous frame to new frame
-            map_point = self.map.get_map_points(point_id)
+            map_point = self.map.get_map_point(point_id)
             if map_point is None:
                 continue
 
-            for kf in self.map.keyframe.values(): # checking all keyframe instance in global map
+            for kf in self.map.keyframes.values(): # checking all keyframe instance in global map
                 # Check if this keyframe observes the map point
                 for kp_idx, mp_id in kf.map_points.items():
                     if mp_id == point_id:
@@ -622,7 +622,7 @@ class Tracking:
         # ====== 3. Optimize pose with all matches =======
         
         # Combine initial and new matches
-        all_matches = {** self.track_with_map_points, **new_matches}
+        all_matches = {** self.tracked_map_points, **new_matches}
 
         if len(all_matches) < 20: # Not enough matches for reliable pose estimation
             print(f"Not enough matches for local map tracking: {len(all_matches)}")
@@ -639,12 +639,9 @@ class Tracking:
         self.current_pose = temp_keyframe.pose
         self.tracked_map_points = all_matches
 
-        print(f"Local map tracking: {len(self.track_with_map_points)} points tracked")
+        print(f"Local map tracking: {len(self.tracked_map_points)} points tracked")
         return True
     
-        
-
-
     
     def check_new_keyframe(self, frame_id, keypoints, descriptors):
         """
@@ -673,6 +670,7 @@ class Tracking:
             self.mMaxFrames += 1
             return False
         
+        # Condition 3: Check if current frame tracks enough map points
         if len(self.tracked_map_points) <50:
             # Not enough points tracked
             return False
@@ -754,7 +752,7 @@ class Tracking:
                 max_observations = count
                 ref_id = kf_id
         
-        return self.map.get_keyframe(ref_id)_
+        return self.map.get_keyframe(ref_id)
 
 
 
