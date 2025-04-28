@@ -1,9 +1,10 @@
 import numpy as np
 import cv2
+from scipy.spatial import cKDTree
 from orbslam.frontend.feature_extractor import FeatureExtractor
 from orbslam.frontend.feature_matcher import FeatureMatcher
 from orbslam.core.bundle_adjustment import BundleAdjustment
-from orbslam.bow_database import BoWDatabase
+from orbslam.utils.bow_database import BoWDatabase
 from orbslam.core.map import Map
 from orbslam.core.map_point import MapPoint
 from orbslam.core.keyframe import KeyFrame
@@ -38,13 +39,15 @@ class Tracking:
             "last_keyframe": self.map.get_keyframe(1),      # Assumes keyframe 1 exists.
             "second_last_keyframe": self.map.get_keyframe(0)  # Assumes keyframe 0 exists.
         }
-        self.current_keypoints = None
-        self.current_descriptors = None
         
         # Current frame state:
         self.current_frame = None
+        self.current_keypoints = None
+        self.current_descriptors = None
         self.current_pose = None             # 4x4 transformation matrix (world-to-camera)
-        self.tracked_map_points = {}         # Mapping: current frame keypoint index -> MapPoint ID
+        self.tracked_map_points = {}         # Mapping: current frame 2D of current image 
+                                             # keypoint index -> MapPoint ID
+        
         # After global initialization is complete
         if self.map.get_keyframe(1) is not None:
             self.last_frame = self.map.get_keyframe(1)
@@ -55,7 +58,7 @@ class Tracking:
         self.mVelocity = np.eye(4, dtype=np.float32)  # Initial velocity (identity)
         self.mState = "WORKING"                       # Tracking state (could be "NOT_INITIALIZED", "LOST", etc.)
         self.mMinFrames = 0                           # Minimum frames to wait before inserting a new keyframe
-        self.mMaxFrames = 20                          # Maximum frames allowed before considering keyframe insertion
+        self.mMaxFrames = 0                           # Frames since last keyframe insertion
         
         print("Tracking module initialized:")
         print(f" - Camera intrinsics:\n{self.K}")
@@ -79,7 +82,7 @@ class Tracking:
         :param frame: Input grayscale image.
         :param frame_id: ID of the frame in the sequence.
         """
-        # (Optionally) store the raw image in current_frame for visualization, etc.
+        # Store the raw image in current_frame for visualization, etc.
         self.current_frame = frame
         
         # Extract features from the current frame.
@@ -87,6 +90,7 @@ class Tracking:
         
         self.current_keypoints = keypoints
         self.current_descriptors = descriptors
+
         # Attempt to track using the cascade of methods.
         success = self.track_with_motion_model(keypoints, descriptors)
         if not success:
@@ -101,6 +105,11 @@ class Tracking:
             self.track_local_map()
             self.check_new_keyframe(frame_id, keypoints, descriptors)
             self.mState = "WORKING"
+
+            # Update velocity for motion model
+            if self.last_frame is not None and hasattr(self.last_frame, 'pose'):
+                last_pose_inv = np.linalg.inv(self.last_frame.pose)
+                self.mVelocity = self.current_pose @ last_pose_inv
         else:
             print("Tracking lost!")
             self.mState = "LOST"
@@ -109,15 +118,26 @@ class Tracking:
         if self.current_pose is not None and self.mState == "WORKING":
             # Create a new keyframe from the current frame's extracted features.
             new_keyframe = KeyFrame(frame_id, self.current_pose, self.K, keypoints, descriptors)
+            
+            # Associate current tracked map points with the new keyframe
+            for keypoint_idx, map_point_id in self.tracked_map_points.items():
+                new_keyframe.add_map_point(keypoint_idx, map_point_id)
+
             self.map.add_keyframe(new_keyframe)
+
             # Update the motion model by shifting keyframes.
             self.motion_model["second_last_keyframe"] = self.motion_model["last_keyframe"]
             self.motion_model["last_keyframe"] = new_keyframe
-            # IMPORTANT: Set last_frame to the new keyframe (not the raw image)
+
+            # IMPORTANT: Set last_frame to the new keyframe 
             self.last_frame = new_keyframe
+
+            return self.current_pose
+        
         else:
             print("Not updating keyframes because tracking is lost.")
-            # Optionally, you might choose to keep the previous last_frame if tracking is lost.
+            # When tracking is lost, keep the previous last_frame
+            return None
 
         
     def _projection_match_search(self, keypoints, descriptors, windowSize, TH_HIGH, MIN_MATCHES):
@@ -130,22 +150,29 @@ class Tracking:
         :param windowSize: Search window size (in pixels).
         :param TH_HIGH: Maximum acceptable Hamming distance.
         :param MIN_MATCHES: Minimum number of matches required.
-        :return: A dictionary mapping keypoint indices (from last keyframe) to current frame keypoint indices,
+        :return: A dictionary mapping keypoint indices in current frame to map point IDs,
                 or None if not enough matches are found.
         """
+        if self.current_pose is None:
+            return None
+        
         # Convert current pose to rotation vector for projection.
         R = self.current_pose[:3, :3]
         t = self.current_pose[:3, 3]
         rvec, _ = cv2.Rodrigues(R)
         
         # Get map point indices from the last keyframe's stored associations.
+        if self.motion_model["last_keyframe"] is None:
+            return None
+        
         mp_keys = list(self.motion_model["last_keyframe"].map_points.keys())
         if not mp_keys:
             return None
 
         mp_positions = []
         mp_descs = []
-        mp_map_idx = []  # These indices correspond to map points in map for this keyframe
+        mp_map_ids = []  # These are the map point IDs
+
         for idx in mp_keys:
             map_point_id = self.motion_model["last_keyframe"].map_points[idx]
             mp = self.map.get_map_point(map_point_id)
@@ -153,7 +180,8 @@ class Tracking:
                 continue
             mp_positions.append(mp.position)
             mp_descs.append(mp.descriptor)
-            mp_map_idx.append(idx)
+            mp_map_ids.append(map_point_id)
+
         if not mp_positions:
             return None
 
@@ -166,12 +194,16 @@ class Tracking:
 
         # Build a KD-tree for current frame keypoints.
         current_kp_positions = np.array([kp.pt for kp in keypoints], dtype=np.float32) # New image pts 
-        from scipy.spatial import cKDTree
         kd_tree = cKDTree(current_kp_positions)
 
         # Perform matching for each projected map point.
         projected_matches = {}
         bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+
+        # Check frame dimensions for bounds checking
+        if self.current_frame is None:
+            return None
+        
         h_img, w_img = self.current_frame.shape  # Assumes grayscale image.
         mfNNratio = 0.9
 
@@ -179,30 +211,35 @@ class Tracking:
             x, y = proj
             if x < 0 or x >= w_img or y < 0 or y >= h_img:
                 continue
+
+            # Query the KD-tree for keypoints within windowSize of the projection 
             candidate_indices = kd_tree.query_ball_point(proj, windowSize) # query on new image tree
             if not candidate_indices:
                 continue
+
+            # Get descriptors for candidates
             candidate_descs = np.array([descriptors[idx] for idx in candidate_indices]) # getting new image's descrip
             map_desc = np.array([mp_descs[i]])
+
+            # Match descriptors
             matches = bf.knnMatch(map_desc, candidate_descs, k=2)
             if not matches or len(matches[0]) == 0:
                 continue
+
             best_matches = matches[0]
             if len(best_matches) < 2:
                 if best_matches[0].distance < TH_HIGH:
                     current_idx = candidate_indices[best_matches[0].trainIdx] # just a idea to check for queryIdx
-                    map_point_id = self.motion_model["last_keyframe"].map_points[mp_map_idx[i]]
-                    projected_matches[current_idx] =  map_point_id
+                    projected_matches[current_idx] =  mp_map_ids[i]
             else:
                 if best_matches[0].distance < mfNNratio * best_matches[1].distance and best_matches[0].distance < TH_HIGH:
                     current_idx = candidate_indices[best_matches[0].trainIdx]
-                    map_point_id = self.motion_model["last_keyframe"].map_points[mp_map_idx[i]]
-                    projected_matches[current_idx] = map_point_id
-
+                    projected_matches[current_idx] = mp_map_ids[i]
 
         if len(projected_matches) < MIN_MATCHES:
             print(f"Projection match search: Not enough matches ({len(projected_matches)})")
             return None
+        
         return projected_matches
 
     def track_with_motion_model(self, keypoints, descriptors):
@@ -214,25 +251,30 @@ class Tracking:
         
         Returns True if tracking is successful, False otherwise.
         """
-        # --- 1. Pose Prediction using last frame's pose and precomputed velocity ---
+        # Check if we have a last frame to use as reference
         if self.last_frame is None or not hasattr(self.last_frame, 'pose'):
             return False
+        
+        # Predict pose using constant velocity model
         predicted_pose = np.dot(self.mVelocity, self.last_frame.pose)
         self.current_pose = predicted_pose
 
-        # Narrow search parameters:
+        # Narrow search parameters for guided feature matching
         windowSize = 15
         TH_HIGH = 100
         MIN_MATCHES = 20
 
+        # Find matches between map points and current frame features
         matches = self._projection_match_search(keypoints, descriptors, windowSize, TH_HIGH, MIN_MATCHES)
         if matches is None:
             return False
 
-        # --- 5. Refine Pose ---
+        # Refine pose with motion-only bundle adjustment
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
         temp_keyframe.map_points = matches 
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
+
+        # Update the current pose and tracked map points
         self.current_pose = temp_keyframe.pose
         self.tracked_map_points = matches
 
@@ -250,10 +292,12 @@ class Tracking:
         """
         if self.motion_model["last_keyframe"] is None:
             return False
+        
+        # Use the last keyframe's pose as initial guess
         reference_pose = self.motion_model["last_keyframe"].pose.copy()
         self.current_pose = reference_pose
 
-        # Wider search parameters:
+        # Wider search parameters for a more exhaustive search
         windowSize = 200
         TH_HIGH = 100
         MIN_MATCHES = 10
@@ -262,9 +306,12 @@ class Tracking:
         if matches is None:
             return False
 
+        # Refine the pose with motion-only bundle adjustment
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
         temp_keyframe.map_points = matches
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
+
+        # Update the current pose and tracked map points
         self.current_pose = temp_keyframe.pose
         self.tracked_map_points = matches
 
@@ -311,7 +358,6 @@ class Tracking:
                 continue
             
             # 3a. Match candidate keyframe descriptors to current frame descriptors.
-            # (We assume self.feature_matcher.match returns a list of match objects.)
             matches = self.feature_matcher.match(candidate_kf.descriptors, descriptors, candidate_kf.keypoints, keypoints)
             if matches is None or len(matches) < 15:
                 continue
@@ -333,9 +379,11 @@ class Tracking:
                 mp = self.map.get_map_point(map_point_id)
                 if mp is None:
                         continue
+                
                 pts_3d.append(mp.position)
                 pts_2d.append(keypoints[curr_idx].pt)
                 valid_matches.append(m) # track the valid matches
+
             if len(pts_3d) < 6:
                 continue
 
@@ -371,6 +419,7 @@ class Tracking:
         self.current_pose = best_pose
 
         # Update tracked map points from the best candidate
+        self.tracked_map_points = {}
         best_candidate_kf = self.map.get_keyframe(best_candidate_id)
         for m in best_matches:
             cand_idx = m.queryIdx
@@ -382,7 +431,7 @@ class Tracking:
                     self.tracked_map_points[curr_idx] = map_point_id
                     
         temp_keyframe = KeyFrame(-1, self.current_pose, self.K, keypoints, descriptors)
-        # (Optionally, you could re-associate map points using a guided search here.)
+        temp_keyframe.add_map_point = self.tracked_map_points
         self.bundle_adjustment.optimize_pose(temp_keyframe, self.map)
         self.current_pose = temp_keyframe.pose
 
@@ -437,7 +486,7 @@ class Tracking:
 
                         # Count for reference keyframe selection
                         if kf.id not in point_observations:
-                            point_observations[kf.id]=0
+                            point_observations[kf.id] = 0
                         point_observations[kf.id] += 1
                         break
         if not K1:
@@ -445,6 +494,9 @@ class Tracking:
             return False
         
         # Find reference keyframe (most shared points)
+        if not point_observations:
+            return False
+        
         K_ref_id = max(point_observations.items(), key=lambda x: x[1])[0]
         K_ref = self.map.get_keyframe(K_ref_id)
 
@@ -702,7 +754,7 @@ class Tracking:
                 max_observations = count
                 ref_id = kf_id
         
-        return self.map.get_keyframe(ref_id)
+        return self.map.get_keyframe(ref_id)_
 
 
 
